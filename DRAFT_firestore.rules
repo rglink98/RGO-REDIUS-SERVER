@@ -1,0 +1,102 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      // In this app, the primary user is the admin.
+      // We can also check against an 'admins' collection.
+      return isVerified() && (
+        request.auth.token.email == 'rglink98@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Validation Blueprints
+    function isValidCustomer(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 200 &&
+             data.username is string && data.username.size() > 0 && data.username.size() < 100 &&
+             data.status in ['active', 'expired', 'disabled', 'suspended'] &&
+             data.packageId is string &&
+             (data.monthlyBill == null || data.monthlyBill is number);
+    }
+
+    function isValidPackage(data) {
+      return data.name is string && data.name.size() > 0 &&
+             data.price is number && data.price >= 0;
+    }
+
+    function isValidTransaction(data) {
+      return data.customerId is string &&
+             data.amount is number &&
+             data.type in ['recharge', 'monthly_bill', 'activation', 'other'] &&
+             data.status in ['paid', 'pending', 'overdue'];
+    }
+
+    function isValidFinance(data) {
+      return data.type in ['income', 'expense'] &&
+             data.amount is number && data.amount >= 0;
+    }
+
+    // Match patterns
+    match /customers/{customerId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidCustomer(incoming()) && 
+                    incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidCustomer(incoming()) &&
+                    incoming().updatedAt == request.time;
+      allow delete: if isAdmin();
+    }
+
+    match /packages/{packageId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidPackage(incoming());
+      allow update: if isAdmin() && isValidPackage(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidTransaction(incoming());
+      allow update: if isAdmin() && isValidTransaction(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /finance/{financeId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidFinance(incoming());
+      allow update: if isAdmin() && isValidFinance(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /admins/{adminId} {
+      allow read: if isAdmin();
+      // Only existing admins can add new admins
+      allow write: if isAdmin();
+    }
+  }
+}

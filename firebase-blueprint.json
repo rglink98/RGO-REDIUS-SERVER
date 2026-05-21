@@ -1,0 +1,86 @@
+{
+  "entities": {
+    "Customer": {
+      "title": "Customer",
+      "description": "An ISP client/subscriber",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "username": { "type": "string" },
+        "password": { "type": "string" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "expired", "disabled", "suspended"] },
+        "packageId": { "type": "string" },
+        "packageName": { "type": "string" },
+        "monthlyBill": { "type": "number" },
+        "expiryDate": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "username", "status", "packageId"]
+    },
+    "Package": {
+      "title": "Package",
+      "description": "ISP speed and pricing package",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "speed": { "type": "string" },
+        "price": { "type": "number" },
+        "description": { "type": "string" }
+      },
+      "required": ["name", "price"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Billing records for customers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["recharge", "monthly_bill", "activation", "other"] },
+        "method": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["paid", "pending", "overdue"] }
+      },
+      "required": ["customerId", "amount", "type", "date", "status"]
+    },
+    "Finance": {
+      "title": "Finance",
+      "description": "General income and expenses",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["income", "expense"] },
+        "category": { "type": "string" },
+        "amount": { "type": "number" },
+        "date": { "type": "string", "format": "date-time" },
+        "description": { "type": "string" }
+      },
+      "required": ["type", "amount", "date"]
+    }
+  },
+  "firestore": {
+    "customers": {
+      "schema": "Customer",
+      "description": "Collection of all ISP subscribers"
+    },
+    "packages": {
+      "schema": "Package",
+      "description": "Collection of available internet packages"
+    },
+    "transactions": {
+      "schema": "Transaction",
+      "description": "History of all financial transactions related to billing"
+    },
+    "finance": {
+      "schema": "Finance",
+      "description": "History of general business finances"
+    }
+  }
+}

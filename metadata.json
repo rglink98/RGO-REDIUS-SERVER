@@ -1,0 +1,8 @@
+{
+  "name": "ISP Radius Manager",
+  "description": "A comprehensive ISP management system for tracking customers, billing, and system health.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,96 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerified() && (
+        request.auth.token.email == 'rglink98@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidCustomer(data) {
+      return data.keys().hasAll(['name', 'username', 'status', 'packageId']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 200 &&
+             data.username is string && data.username.size() > 0 && data.username.size() < 100 &&
+             data.status in ['active', 'expired', 'disabled', 'suspended'] &&
+             data.packageId is string;
+    }
+
+    function isValidPackage(data) {
+      return data.keys().hasAll(['name', 'price']) &&
+             data.name is string && data.name.size() > 0 &&
+             data.price is number && data.price >= 0;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasAll(['customerId', 'amount', 'type', 'date', 'status']) &&
+             data.customerId is string &&
+             data.amount is number &&
+             data.type in ['recharge', 'monthly_bill', 'activation', 'other'] &&
+             data.status in ['paid', 'pending', 'overdue'];
+    }
+
+    function isValidFinance(data) {
+      return data.keys().hasAll(['type', 'amount', 'date']) &&
+             data.type in ['income', 'expense'] &&
+             data.amount is number && data.amount >= 0;
+    }
+
+    match /customers/{customerId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidCustomer(incoming());
+      allow update: if isAdmin() && isValidCustomer(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /packages/{packageId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidPackage(incoming());
+      allow update: if isAdmin() && isValidPackage(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /transactions/{transactionId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidTransaction(incoming());
+      allow update: if isAdmin() && isValidTransaction(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /finance/{financeId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidFinance(incoming());
+      allow update: if isAdmin() && isValidFinance(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /admins/{adminId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+  }
+}

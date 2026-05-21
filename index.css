@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --sidebar-bg: #002d2d;
+  --sidebar-text: #ffffff;
+  --main-bg: #f8fafc;
+  --card-bg: #ffffff;
+}
+
+body {
+  background-color: var(--main-bg);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+@layer base {
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 10px;
+  }
+}
