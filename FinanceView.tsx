@@ -21,7 +21,8 @@ import {
   RefreshCw,
   Clock,
   Trash2,
-  CalendarDays
+  CalendarDays,
+  X
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -51,6 +52,7 @@ export function FinanceView({
 }) {
   const [showAddExpense, setShowAddExpense] = useState(false);
   const [showAddIncome, setShowAddIncome] = useState(false);
+  const [selectedInvoice, setSelectedInvoice] = useState<any | null>(null);
   const [financeData, setFinanceData] = useState({ 
     category: '', 
     amount: '', 
@@ -62,23 +64,114 @@ export function FinanceView({
   const [activeTab, setActiveTab] = useState<'ledger' | 'recurring'>('ledger');
   const [loading, setLoading] = useState(false);
 
-  const totalIncome = transactions.filter(t => t.status === 'paid').reduce((acc, t) => acc + (t.amount || 0), 0) + 
-                  financeRecords.filter(f => f.type === 'income').reduce((acc, f) => acc + (f.amount || 0), 0);
-  
-  const totalExpense = financeRecords.filter(f => f.type === 'expense').reduce((acc, f) => acc + (f.amount || 0), 0);
-  const netProfit = totalIncome - totalExpense;
+  // Month filtering state
+  const [selectedMonth, setSelectedMonth] = useState<string>(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  });
 
-  const getLast7Days = () => {
+  const getRecordMonthKey = (record: any) => {
+    try {
+      if (!record || !record.date) return '';
+      const d = record.date?.toDate ? record.date.toDate() : new Date(record.date);
+      if (isNaN(d.getTime())) return '';
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      return `${year}-${month}`; // e.g. "2026-06"
+    } catch {
+      return '';
+    }
+  };
+
+  const translateDigitsToBengali = (num: string | number) => {
+    const eng = ['0','1','2','3','4','5','6','7','8','9'];
+    const ben = ['০','১','২','৩','৪','৫','৬','৭','৮','৯'];
+    return String(num).split('').map(char => {
+      const idx = eng.indexOf(char);
+      return idx !== -1 ? ben[idx] : char;
+    }).join('');
+  };
+
+  const getAvailableMonths = () => {
+    const monthsSet = new Set<string>();
+    
+    // Add current month by default so it's always accessible
+    const now = new Date();
+    const currentMonthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    monthsSet.add(currentMonthKey);
+
+    transactions.forEach(t => {
+      const key = getRecordMonthKey(t);
+      if (key) monthsSet.add(key);
+    });
+
+    financeRecords.forEach(f => {
+      const key = getRecordMonthKey(f);
+      if (key) monthsSet.add(key);
+    });
+
+    return Array.from(monthsSet).sort().reverse(); // Sort descending
+  };
+
+  const formatMonthLabel = (monthKey: string) => {
+    if (monthKey === 'all') return 'সকল সময় (All Time)';
+    const [year, month] = monthKey.split('-');
+    const date = new Date(parseInt(year), parseInt(month) - 1, 1);
+    const englishLabel = date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    const bengaliMonthNames = [
+      'জানুয়ারি', 'ফেব্রুয়ারি', 'মার্চ', 'এপ্রিল', 'মে', 'জুন',
+      'জুলাই', 'আগস্ট', 'সেপ্টেম্বর', 'অক্টোবর', 'নভেম্বর', 'ডিসেম্বর'
+    ];
+    const bengaliLabel = `${bengaliMonthNames[parseInt(month) - 1]} ${translateDigitsToBengali(year)}`;
+    return `${bengaliLabel} (${englishLabel})`;
+  };
+
+  const getDaysInMonthList = (monthKey: string) => {
+    const [yearStr, monthStr] = monthKey.split('-');
+    const year = parseInt(yearStr);
+    const month = parseInt(monthStr) - 1; // 0-indexed
+    const date = new Date(year, month, 1);
     const days = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      days.push(d.toISOString().split('T')[0]);
+    while (date.getMonth() === month) {
+      days.push(new Date(date).toISOString().split('T')[0]);
+      date.setDate(date.getDate() + 1);
     }
     return days;
   };
 
-  const chartData = getLast7Days().map(date => {
+  // Filter transactions and finance records by selected month path
+  const monthFilteredTransactions = transactions.filter(t => {
+    if (selectedMonth === 'all') return true;
+    return getRecordMonthKey(t) === selectedMonth;
+  });
+
+  const monthFilteredFinanceRecords = financeRecords.filter(f => {
+    if (selectedMonth === 'all') return true;
+    return getRecordMonthKey(f) === selectedMonth;
+  });
+
+  const totalIncome = monthFilteredTransactions.filter(t => t.status === 'paid').reduce((acc, t) => acc + (t.amount || 0), 0) + 
+                  monthFilteredFinanceRecords.filter(f => f.type === 'income').reduce((acc, f) => acc + (f.amount || 0), 0);
+  
+  const totalExpense = monthFilteredFinanceRecords.filter(f => f.type === 'expense').reduce((acc, f) => acc + (f.amount || 0), 0);
+  const netProfit = totalIncome - totalExpense;
+
+  const getChartDays = () => {
+    if (selectedMonth === 'all') {
+      const days = [];
+      for (let i = 29; i >= 0; i--) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        days.push(d.toISOString().split('T')[0]);
+      }
+      return days;
+    } else {
+      return getDaysInMonthList(selectedMonth);
+    }
+  };
+
+  const chartDays = getChartDays();
+  const chartData = chartDays.map(date => {
     const incomeOnDay = transactions
       .filter(t => t.status === 'paid' && (t.date?.toDate ? t.date.toDate().toISOString().split('T')[0] === date : new Date(t.date).toISOString().split('T')[0] === date))
       .reduce((acc, t) => acc + (t.amount || 0), 0) +
@@ -90,8 +183,12 @@ export function FinanceView({
       .filter(f => f.type === 'expense' && (f.date?.toDate ? f.date.toDate().toISOString().split('T')[0] === date : new Date(f.date).toISOString().split('T')[0] === date))
       .reduce((acc, f) => acc + (f.amount || 0), 0);
 
+    const dayName = selectedMonth === 'all' 
+      ? new Date(date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+      : new Date(date).getDate();
+
     return {
-      name: new Date(date).toLocaleDateString(undefined, { weekday: 'short' }),
+      name: String(dayName),
       income: incomeOnDay,
       expense: expenseOnDay,
       profit: incomeOnDay - expenseOnDay
@@ -160,12 +257,80 @@ export function FinanceView({
     }
   };
 
+  const getRecordDateString = (record: any) => {
+    try {
+      const d = record.date?.toDate ? record.date.toDate() : new Date(record.date);
+      if (isNaN(d.getTime())) return 'N/A';
+      return d.toISOString().split('T')[0];
+    } catch {
+      return 'N/A';
+    }
+  };
+
+  const getGroupedDailyInvoices = () => {
+    const allRecords = [
+      ...monthFilteredTransactions.map(t => ({ ...t, source: 'transaction', type: 'income' })),
+      ...monthFilteredFinanceRecords.map(f => ({ ...f, source: 'finance' }))
+    ];
+
+    const groupedByDate: Record<string, any[]> = {};
+    allRecords.forEach(record => {
+      const dateStr = getRecordDateString(record);
+      if (dateStr === 'N/A') return;
+      if (!groupedByDate[dateStr]) {
+        groupedByDate[dateStr] = [];
+      }
+      groupedByDate[dateStr].push(record);
+    });
+
+    return Object.keys(groupedByDate).map(dateStr => {
+      const records = groupedByDate[dateStr];
+      const income = records
+        .filter(r => r.type === 'income' || r.status === 'paid')
+        .reduce((sum, r) => sum + (r.amount || 0), 0);
+      const expense = records
+        .filter(r => r.type === 'expense')
+        .reduce((sum, r) => sum + (r.amount || 0), 0);
+
+      return {
+        dateStr,
+        records,
+        income,
+        expense,
+        profit: income - expense,
+        invoiceNo: `INV-${dateStr.replace(/-/g, '')}`
+      };
+    }).sort((a, b) => b.dateStr.localeCompare(a.dateStr));
+  };
+
+  const dailyInvoices = getGroupedDailyInvoices();
+
   return (
     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6 pb-12">
       <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 flex flex-wrap justify-between items-center gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 mb-1 text-emerald-900">Financial Ledger</h1>
-          <p className="text-sm text-gray-400">Comprehensive view of business cashflow</p>
+        <div className="flex flex-wrap items-center gap-6">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 mb-1 text-emerald-900">Financial Ledger</h1>
+            <p className="text-sm text-gray-400">Comprehensive view of business cashflow</p>
+          </div>
+
+          {/* Month Selector Dropdown */}
+          <div className="flex items-center gap-2 bg-slate-50 hover:bg-slate-100 transition-colors px-4 py-2.5 rounded-2xl border border-gray-150 relative">
+            <CalendarDays className="text-emerald-600 w-5 h-5" />
+            <select
+              id="selected-month-filter"
+              value={selectedMonth}
+              onChange={(e) => setSelectedMonth(e.target.value)}
+              className="bg-transparent border-none outline-none font-bold text-sm text-gray-700 cursor-pointer pr-1"
+            >
+              <option value="all">সকল সময় (All Time)</option>
+              {getAvailableMonths().map(monthKey => (
+                <option key={monthKey} value={monthKey}>
+                  {formatMonthLabel(monthKey)}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
         <div className="flex gap-3">
           {hasPermission('Finance', 'create') && (
@@ -308,7 +473,7 @@ export function FinanceView({
             </button>
           </div>
           <p className="text-xs font-bold text-gray-400 mr-4">
-            {activeTab === 'ledger' ? `${transactions.length + financeRecords.length} Records` : `${financeRecords.filter(f => f.isRecurring).length} Active Schedules`}
+            {activeTab === 'ledger' ? `${monthFilteredTransactions.length + monthFilteredFinanceRecords.length} Records` : `${financeRecords.filter(f => f.isRecurring).length} Active Schedules`}
           </p>
         </div>
 
@@ -326,13 +491,13 @@ export function FinanceView({
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {[
-                  ...transactions.map(t => ({ ...t, source: 'transaction' })),
-                  ...financeRecords.map(f => ({ ...f, source: 'finance' }))
+                  ...monthFilteredTransactions.map(t => ({ ...t, source: 'transaction' })),
+                  ...monthFilteredFinanceRecords.map(f => ({ ...f, source: 'finance' }))
                 ].sort((a, b) => {
                   const dateA = a.date?.toDate ? a.date.toDate() : new Date(a.date);
                   const dateB = b.date?.toDate ? b.date.toDate() : new Date(b.date);
                   return dateB.getTime() - dateA.getTime();
-                }).slice(0, 30).map((record: any) => {
+                }).map((record: any) => {
                   const isIncome = record.status === 'paid' || record.type === 'income';
                   return (
                     <tr key={record.id} className="hover:bg-gray-50/30 transition-colors group">
@@ -449,6 +614,245 @@ export function FinanceView({
           </div>
         )}
       </div>
+
+      {/* Daily Joint Invoices Section */}
+      <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-6 space-y-6">
+        <div>
+          <h2 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+            <FileText size={20} className="text-emerald-500" />
+            দৈনিক সম্মিলিত ইনভয়েস সিস্টেম (Daily Joint Invoices)
+          </h2>
+          <p className="text-xs text-gray-400 mt-1">
+            প্রতিটি দিনের সকল লেনদেন একত্রিত করে একটি ইনভয়েস জেনারেট করা হয়েছে
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {dailyInvoices.length === 0 ? (
+            <div className="col-span-full py-12 text-center text-gray-400 border border-dashed border-gray-200 rounded-2xl">
+              কোন দৈনিক লেনদেন পাওয়া যায়নি।
+            </div>
+          ) : (
+            dailyInvoices.slice(0, 9).map((invoice) => (
+              <div 
+                key={invoice.dateStr}
+                className="p-5 border border-gray-100 bg-gray-50/50 rounded-2xl hover:bg-white hover:border-emerald-100 hover:shadow-md transition-all flex flex-col justify-between"
+              >
+                <div>
+                  <div className="flex justify-between items-start mb-3">
+                    <span className="text-xs font-black text-[#002d2d] bg-emerald-50 px-2 py-1 rounded">
+                      {invoice.invoiceNo}
+                    </span>
+                    <span className="text-xs text-gray-400 font-bold">
+                      {new Date(invoice.dateStr).toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' })}
+                    </span>
+                  </div>
+                  
+                  <div className="space-y-2 my-4">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-gray-400 font-bold">মোট আয়:</span>
+                      <span className="text-emerald-600 font-bold">৳{invoice.income.toLocaleString()}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-gray-400 font-bold">মোট ব্যয়:</span>
+                      <span className="text-red-500 font-bold">৳{invoice.expense.toLocaleString()}</span>
+                    </div>
+                    <div className="border-t border-dashed border-gray-200 pt-2 flex justify-between text-xs">
+                      <span className="text-gray-900 font-bold">নিট লাভ:</span>
+                      <span className={cn(
+                        "font-extrabold text-sm",
+                        invoice.profit >= 0 ? "text-indigo-600" : "text-red-600"
+                      )}>
+                        ৳{invoice.profit.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => setSelectedInvoice(invoice)}
+                  className="mt-2 w-full py-2.5 bg-[#002d2d] hover:bg-[#003d3d] text-white text-xs font-bold rounded-xl shadow-md transition-all active:scale-95 flex items-center justify-center gap-1.5"
+                >
+                  <FileText size={14} /> ইনভয়েস দেখুন (View Invoice)
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      <style>{`
+        @media print {
+          body * {
+            visibility: hidden;
+          }
+          #daily-invoice-sheet, #daily-invoice-sheet * {
+            visibility: visible;
+          }
+          #daily-invoice-sheet {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+          }
+          .no-print {
+            display: none !important;
+          }
+        }
+      `}</style>
+
+      {/* Daily Invoice Detail Modal */}
+      {selectedInvoice && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm overflow-y-auto">
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.95, y: 10 }} 
+            animate={{ opacity: 1, scale: 1, y: 0 }} 
+            className="bg-white rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden my-8"
+          >
+            {/* Modal Header */}
+            <div className="p-6 bg-[#002d2d] text-white flex justify-between items-center no-print">
+              <div className="flex items-center gap-2">
+                <FileText size={20} className="text-emerald-400" />
+                <h3 className="font-bold text-lg">দৈনিক সম্মিলিত ইনভয়েস</h3>
+              </div>
+              <button 
+                onClick={() => setSelectedInvoice(null)} 
+                className="p-1.5 hover:bg-white/10 rounded-lg transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Printable Invoice Sheet */}
+            <div id="daily-invoice-sheet" className="p-8 space-y-6 bg-white text-gray-800">
+              {/* Invoice top branding */}
+              <div className="flex justify-between items-start border-b border-gray-100 pb-6">
+                <div>
+                  <h1 className="text-3xl font-black text-gray-900 tracking-tighter">ISP RADIAL</h1>
+                  <p className="text-xs text-gray-400 font-bold mt-1">INTERNET SERVICE PROVIDER SYSTEM</p>
+                  <p className="text-[11px] text-gray-500 mt-0.5">Daily Transaction Reconciliation Summary</p>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-lg inline-block uppercase tracking-wider mb-2">
+                    {selectedInvoice.invoiceNo}
+                  </div>
+                  <p className="text-xs font-bold text-gray-400">তারিখ / DATE:</p>
+                  <p className="text-sm font-black text-gray-900">
+                    {new Date(selectedInvoice.dateStr).toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' })}
+                  </p>
+                </div>
+              </div>
+
+              {/* Financial summary breakdown widget */}
+              <div className="grid grid-cols-3 gap-4 bg-gray-50 p-4 rounded-2xl border border-gray-100">
+                <div className="text-center p-2">
+                  <p className="text-[10px] font-bold text-gray-400 uppercase">মোট আয় (INFLOW)</p>
+                  <p className="text-lg font-extrabold text-emerald-600 mt-1">৳{selectedInvoice.income.toLocaleString()}</p>
+                </div>
+                <div className="text-center p-2 border-x border-gray-200">
+                  <p className="text-[10px] font-bold text-gray-400 uppercase">মোট ব্যয় (OUTFLOW)</p>
+                  <p className="text-lg font-extrabold text-red-500 mt-1">৳{selectedInvoice.expense.toLocaleString()}</p>
+                </div>
+                <div className="text-center p-2">
+                  <p className="text-[10px] font-bold text-gray-400 uppercase">নিট লাভ (SURPLUS)</p>
+                  <p className={cn(
+                    "text-lg font-extrabold mt-1",
+                    selectedInvoice.profit >= 0 ? "text-indigo-600" : "text-red-500"
+                  )}>
+                    ৳{selectedInvoice.profit.toLocaleString()}
+                  </p>
+                </div>
+              </div>
+
+              {/* Details transactions list table */}
+              <div className="space-y-2">
+                <h4 className="text-xs font-extrabold text-gray-400 uppercase tracking-widest mb-2">
+                  লেনদেনের বিবরণী / DAILY TRANSACTIONS DETAIL
+                </h4>
+                <div className="border border-gray-100 rounded-2xl overflow-hidden">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="bg-gray-50 border-b border-gray-100 text-gray-500">
+                        <th className="p-3 font-bold">বিবরণ / ITEM DESCRIPTION</th>
+                        <th className="p-3 font-bold">ক্যাটাগরি / CATEGORY</th>
+                        <th className="p-3 font-bold text-center">টাইপ / TYPE</th>
+                        <th className="p-3 font-bold text-right">পরিমাণ / AMOUNT</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {selectedInvoice.records.map((rec: any, idx: number) => {
+                        const isInc = rec.type === 'income' || rec.status === 'paid';
+                        return (
+                          <tr key={rec.id || idx} className="hover:bg-gray-50/50">
+                            <td className="p-3">
+                              <p className="font-bold text-gray-800">
+                                {rec.source === 'transaction' ? `Payment from ${rec.customerName || 'Customer'}` : rec.description}
+                              </p>
+                              {rec.source === 'transaction' && rec.customerId && (
+                                <p className="text-[9px] text-gray-400">Client ID: {rec.customerId}</p>
+                              )}
+                            </td>
+                            <td className="p-3">
+                              <span className="text-gray-500 font-semibold text-[11px]">
+                                {rec.category || 'Subscription Balance'}
+                              </span>
+                            </td>
+                            <td className="p-3 text-center">
+                              <span className={cn(
+                                "inline-block px-2 py-0.5 rounded text-[9px] font-extrabold uppercase",
+                                isInc ? "bg-emerald-50 text-emerald-600" : "bg-red-50 text-red-500"
+                              )}>
+                                {isInc ? 'আয় (IN)' : 'ব্যয় (OUT)'}
+                              </span>
+                            </td>
+                            <td className="p-3 text-right">
+                              <span className={cn(
+                                "font-bold",
+                                isInc ? "text-emerald-600" : "text-red-500"
+                              )}>
+                                ৳{rec.amount?.toLocaleString()}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Invoice footer terms */}
+              <div className="border-t border-gray-100 pt-6 flex justify-between items-end">
+                <div>
+                  <p className="text-[10px] text-gray-400">Generated automatically by system on {new Date().toLocaleDateString()}</p>
+                  <p className="text-[11px] text-[#002d2d] font-bold mt-1">ISP RADIAL - Connecting Your World</p>
+                </div>
+                <div className="text-right w-36 border-t border-gray-300 pt-1 text-[10px] font-bold text-gray-400">
+                  কর্তৃপক্ষের স্বাক্ষর / Authorized Sign
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="p-6 bg-gray-50 border-t border-gray-100 flex gap-3 justify-end no-print">
+              <button 
+                type="button" 
+                onClick={() => setSelectedInvoice(null)} 
+                className="px-5 py-2.5 bg-white border border-gray-200 text-gray-600 rounded-xl font-bold hover:bg-gray-100 transition-colors text-xs"
+              >
+                বন্ধ করুন / Close
+              </button>
+              <button 
+                type="button" 
+                onClick={() => window.print()} 
+                className="px-5 py-2.5 bg-[#002d2d] hover:bg-[#003d3d] text-white rounded-xl font-bold shadow-md transition-colors text-xs flex items-center gap-1.5"
+              >
+                <Download size={14} /> মুদ্রণ / Print Report
+              </button>
+            </div>
+          </motion.div>
+        </div>
+      )}
 
       {showAddExpense && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">

@@ -66,7 +66,7 @@ import {
 } from 'recharts';
 import { auth, db } from './firebase';
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
-import { collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, doc, Timestamp, orderBy, limit, where, writeBatch, serverTimestamp } from 'firebase/firestore';
+import { collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, doc, Timestamp, orderBy, limit, where, writeBatch, serverTimestamp, getDocs } from 'firebase/firestore';
 import { Customer, Package, Transaction, FinanceRecord } from './types';
 import { cn } from './utils';
 import { motion, AnimatePresence } from 'motion/react';
@@ -76,6 +76,53 @@ import { FinanceView } from './FinanceView';
 
 // Views
 type View = 'dashboard' | 'create-user' | 'edit-user' | 'all-customers' | 'manage-client' | 'customer-profile' | 'single-recharge' | 'edit-recharge' | 'manage-recharge' | 'packages' | 'create-package' | 'edit-package' | 'finance' | 'settings' | 'role-control' | 'add-admin' | 'manage-admins';
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 export default function App() {
   const [view, setView] = useState<View>('dashboard');
@@ -90,6 +137,13 @@ export default function App() {
   const [permissions, setPermissions] = useState<any[]>([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   
+  // Custom Login States
+  const [loginTab, setLoginTab] = useState<'admin' | 'customer'>('admin');
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+  
   // Data State
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [packages, setPackages] = useState<Package[]>([]);
@@ -102,39 +156,61 @@ export default function App() {
   };
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setUser(user);
+    const savedSession = localStorage.getItem('isp_session');
+    if (savedSession) {
+      try {
+        const parsedUser = JSON.parse(savedSession);
+        if (parsedUser && parsedUser.isCustomAuth) {
+          setUser(parsedUser);
+          setLoading(false);
+          return;
+        }
+      } catch (err) {
+        console.error('Failed to parse saved session', err);
+      }
+    }
+
+    const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
+      setUser(fbUser);
       setLoading(false);
-      if (user) seedData();
+      if (fbUser) seedData();
     });
     return () => unsubscribe();
   }, []);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || user.role === 'customer') return;
 
     // Listen to customers
     const qCustomers = query(collection(db, 'customers'), orderBy('name'));
     const unsubCustomers = onSnapshot(qCustomers, (snapshot) => {
       setCustomers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Customer)));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'customers');
     });
 
     // Listen to packages
     const qPackages = query(collection(db, 'packages'), orderBy('price', 'desc'));
     const unsubPackages = onSnapshot(qPackages, (snapshot) => {
       setPackages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Package)));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'packages');
     });
 
     // Listen to transactions
     const qTransactions = query(collection(db, 'transactions'), orderBy('date', 'desc'), limit(50));
     const unsubTransactions = onSnapshot(qTransactions, (snapshot) => {
       setTransactions(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Transaction)));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'transactions');
     });
 
     // Listen to finance records (expenses/misc income)
     const qFinance = query(collection(db, 'finance'), orderBy('date', 'desc'), limit(100));
     const unsubFinance = onSnapshot(qFinance, (snapshot) => {
       setFinanceRecords(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as FinanceRecord)));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'finance');
     });
 
     // Listen to admin info
@@ -151,17 +227,23 @@ export default function App() {
             if (roleSnap.exists()) {
               setPermissions(roleSnap.data().permissions || []);
             }
+          }, (error) => {
+            handleFirestoreError(error, OperationType.GET, `roles/${adminData.roleId}`);
           });
         }
       } else {
         setAdminInfo(null);
         setPermissions([]);
       }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'admins');
     });
 
     // Listen to roles
     const unsubRoles = onSnapshot(collection(db, 'roles'), (snapshot) => {
       setRoles(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'roles');
     });
 
     return () => {
@@ -174,6 +256,46 @@ export default function App() {
     };
   }, [user]);
 
+  // Auto-repair module to fix customers with 0 monthlyBill from bulk import mismatch
+  useEffect(() => {
+    if (!customers || !packages || customers.length === 0 || packages.length === 0) return;
+    
+    const customersWithZeroBill = customers.filter(c => !c.monthlyBill || c.monthlyBill === 0);
+    if (customersWithZeroBill.length === 0) return;
+
+    const repairCustomers = async () => {
+      // Process maximum 400 at a time to stay safe within batch limit
+      const toRepair = customersWithZeroBill.slice(0, 400);
+      const batch = writeBatch(db);
+      let count = 0;
+
+      for (const c of toRepair) {
+        // Find matching package
+        const pkg = packages.find(p => 
+          p.id === c.packageId || 
+          p.name.toLowerCase().replace(/[\s._-]+/g, '') === (c.packageName || '').toLowerCase().replace(/[\s._-]+/g, '')
+        );
+        const price = pkg?.price || 0;
+        if (price > 0) {
+          const docRef = doc(db, 'customers', c.id);
+          batch.update(docRef, { monthlyBill: price, updatedAt: serverTimestamp() });
+          count++;
+        }
+      }
+
+      if (count > 0) {
+        try {
+          await batch.commit();
+          console.log(`[Auto Repair] Successfully updated ${count} clients to matched package prices.`);
+        } catch (e) {
+          console.error('[Auto Repair] Failed to update client bills', e);
+        }
+      }
+    };
+
+    repairCustomers();
+  }, [customers, packages]);
+
   const handleLogin = async () => {
     const provider = new GoogleAuthProvider();
     try {
@@ -183,7 +305,110 @@ export default function App() {
     }
   };
 
-  const handleLogout = () => signOut(auth);
+  const handleCustomLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginUsername.trim() || !loginPassword.trim()) {
+      setLoginError('দয়া করে ইউজারনেম এবং পাসওয়ার্ড প্রদান করুন!');
+      return;
+    }
+    setLoginError('');
+    setLoginLoading(true);
+
+    try {
+      if (loginTab === 'admin') {
+        const adminsRef = collection(db, 'admins');
+        const qByUsername = query(adminsRef, where('username', '==', loginUsername.trim()));
+        const snapByUsername = await getDocs(qByUsername);
+        
+        let foundAdminDoc = null;
+        if (!snapByUsername.empty) {
+          foundAdminDoc = snapByUsername.docs[0];
+        } else {
+          const qByEmail = query(adminsRef, where('email', '==', loginUsername.trim()));
+          const snapByEmail = await getDocs(qByEmail);
+          if (!snapByEmail.empty) {
+            foundAdminDoc = snapByEmail.docs[0];
+          }
+        }
+
+        if (foundAdminDoc) {
+          const adminData = foundAdminDoc.data();
+          if (adminData.password === loginPassword.trim()) {
+            if (adminData.status === 'suspended') {
+              setLoginError('দুঃখিত, আপনার অ্যাকাউন্টটি স্থগিত (Suspended) করা হয়েছে!');
+              setLoginLoading(false);
+              return;
+            }
+            const customUser = {
+              uid: foundAdminDoc.id,
+              displayName: adminData.name,
+              email: adminData.email,
+              isCustomAuth: true,
+              role: 'admin',
+              roleId: adminData.roleId,
+              username: adminData.username,
+              photoURL: null
+            };
+            localStorage.setItem('isp_session', JSON.stringify(customUser));
+            setUser(customUser);
+            setLoginPassword('');
+            setLoginUsername('');
+          } else {
+            setLoginError('ভুল পাসওয়ার্ড! আবার চেষ্টা করুন।');
+          }
+        } else {
+          setLoginError('ইউজারনেম বা ইমেইল পাওয়া যায়নি!');
+        }
+      } else {
+        const customersRef = collection(db, 'customers');
+        const qByUsername = query(customersRef, where('username', '==', loginUsername.trim()));
+        const snapByUsername = await getDocs(qByUsername);
+
+        if (!snapByUsername.empty) {
+          const customerDoc = snapByUsername.docs[0];
+          const customerData = customerDoc.data();
+          const expectedPassword = customerData.password || customerData.username || '123456';
+          
+          if (expectedPassword === loginPassword.trim()) {
+            if (customerData.status === 'suspended' || customerData.status === 'disabled') {
+              setLoginError('দুঃখিত, আপনার ইন্টারনেট সংযোগটি স্থগিত করা হয়েছে!');
+              setLoginLoading(false);
+              return;
+            }
+            const customUser = {
+              uid: customerDoc.id,
+              displayName: customerData.name,
+              email: customerData.phone || '',
+              isCustomAuth: true,
+              role: 'customer',
+              username: customerData.username,
+              photoURL: null,
+              customerId: customerDoc.id
+            };
+            localStorage.setItem('isp_session', JSON.stringify(customUser));
+            setUser(customUser);
+            setLoginPassword('');
+            setLoginUsername('');
+          } else {
+            setLoginError('ভুল পাসওয়ার্ড! আবার চেষ্টা করুন।');
+          }
+        } else {
+          setLoginError('এই ইউজার আইডি (User ID) টি পাওয়া যায়নি!');
+        }
+      }
+    } catch (err: any) {
+      console.error(err);
+      setLoginError('লগইন করতে ব্যর্থ হয়েছে: ' + err.message);
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('isp_session');
+    setUser(null);
+    signOut(auth);
+  };
 
   const hasPermission = (module: string, action: 'read' | 'create' | 'edit' | 'delete') => {
     if (user?.email === 'rglink98@gmail.com') return true;
@@ -207,31 +432,160 @@ export default function App() {
 
   if (!user) {
     return (
-      <div className="h-screen w-full flex items-center justify-center bg-gradient-to-br from-[#002d2d] to-[#004d4d] p-4">
+      <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-[#001717] via-[#002d2d] to-[#001717] p-4 md:p-8">
         <motion.div 
-          initial={{ opacity: 0, scale: 0.9 }}
+          initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
-          className="p-10 bg-white rounded-[2.5rem] shadow-2xl max-w-md w-full text-center border border-white/20 backdrop-blur-xl"
+          className="bg-white rounded-[2rem] shadow-2xl max-w-lg w-full p-8 md:p-10 border border-gray-100 flex flex-col justify-between"
         >
-          <div className="w-24 h-24 bg-[#002d2d] rounded-3xl flex items-center justify-center mx-auto mb-8 shadow-xl rotate-6 group hover:rotate-0 transition-transform duration-500">
-            <Activity className="text-emerald-400 w-12 h-12" />
+          <div>
+            <div className="w-20 h-20 bg-gradient-to-tr from-[#002d2d] to-emerald-800 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-emerald-950/20">
+              <Activity className="text-emerald-400 w-10 h-10 animate-pulse" />
+            </div>
+            
+            <h1 className="text-3xl font-black text-gray-900 text-center mb-1 tracking-tight uppercase">ISP RADIAL</h1>
+            <p className="text-gray-500 text-center text-sm mb-8">নিরাপদ ড্যাশবোর্ড ও সংযোগ নিয়ন্ত্রণ পোর্টাল</p>
+            
+            {/* Login Tab Selection */}
+            <div className="bg-gray-100 p-1.5 rounded-2xl flex items-center justify-between mb-6 border border-gray-100">
+              <button
+                type="button"
+                onClick={() => {
+                  setLoginTab('admin');
+                  setLoginError('');
+                }}
+                className={cn(
+                  "flex-1 py-3 text-xs md:text-sm font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2",
+                  loginTab === 'admin' 
+                    ? "bg-[#002d2d] text-white shadow-md shadow-[#002d2d]/20 scale-[1.02]" 
+                    : "text-gray-500 hover:text-gray-900 hover:bg-gray-200"
+                )}
+              >
+                <ShieldCheck size={16} />
+                <span>স্টাফ/এডমিন লগইন</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setLoginTab('customer');
+                  setLoginError('');
+                }}
+                className={cn(
+                  "flex-1 py-3 text-xs md:text-sm font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2",
+                  loginTab === 'customer' 
+                    ? "bg-[#002d2d] text-white shadow-md shadow-[#002d2d]/20 scale-[1.02]" 
+                    : "text-gray-500 hover:text-gray-900 hover:bg-gray-200"
+                )}
+              >
+                <User size={16} />
+                <span>গ্রাহক/ইউজার লগইন</span>
+              </button>
+            </div>
+            
+            {loginError && (
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="bg-red-50 text-red-700 p-4 rounded-xl text-xs md:text-sm font-bold mb-6 flex items-center gap-2 border border-red-100 text-left"
+              >
+                <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                <span>{loginError}</span>
+              </motion.div>
+            )}
+
+            {/* Custom Login Form */}
+            <form onSubmit={handleCustomLoginSubmit} className="space-y-4">
+              <div className="text-left">
+                <label className="block text-xs font-black text-gray-400 uppercase tracking-wider mb-2">
+                  {loginTab === 'admin' ? 'ইউজারনেম বা ইমেইল (Username / Email)' : 'গ্রাহক আইডি (User ID / Username)'}
+                </label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400">
+                    <User size={18} />
+                  </span>
+                  <input
+                    type="text"
+                    required
+                    placeholder={loginTab === 'admin' ? 'Enter admin username or email' : 'e.g., rahim01'}
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    className="w-full pl-12 pr-4 py-3.5 bg-gray-50 border border-gray-200 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-[#002d2d]/10 focus:bg-white transition-all text-gray-900 font-medium"
+                  />
+                </div>
+              </div>
+
+              <div className="text-left">
+                <label className="block text-xs font-black text-gray-400 uppercase tracking-wider mb-2">
+                  পাসওয়ার্ড (Password)
+                </label>
+                <div className="relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400">
+                    <Lock size={18} />
+                  </span>
+                  <input
+                    type="password"
+                    required
+                    placeholder="••••••••"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    className="w-full pl-12 pr-4 py-3.5 bg-gray-50 border border-gray-200 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-[#002d2d]/10 focus:bg-white transition-all text-gray-900 font-medium"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={loginLoading}
+                className="w-full bg-[#002d2d] text-white py-4 rounded-2xl font-bold text-sm tracking-wide hover:bg-[#003d3d] disabled:opacity-50 transition-all flex items-center justify-center gap-2 cursor-pointer shadow-xl shadow-[#002d2d]/10 mt-6 active:scale-[0.98]"
+              >
+                {loginLoading ? (
+                  <div className="animate-spin rounded-full h-5 w-5 border-2 border-white border-t-transparent" />
+                ) : (
+                  <>
+                    <span>প্রবেশ করুন (Secure Login)</span>
+                    <Rocket size={16} />
+                  </>
+                )}
+              </button>
+            </form>
+
+            {/* Google Login as fallback for admin only */}
+            {loginTab === 'admin' && (
+              <div className="mt-6 pt-6 border-t border-gray-100">
+                <div className="relative mb-6">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-gray-200"></div>
+                  </div>
+                  <div className="relative flex justify-center text-xs uppercase">
+                    <span className="bg-white px-3 text-gray-400 font-bold tracking-wider">অথবা গুগল দিয়ে লগইন</span>
+                  </div>
+                </div>
+
+                <button 
+                  type="button"
+                  onClick={handleLogin}
+                  className="w-full bg-white text-gray-700 border border-gray-200 py-3 rounded-2xl font-bold text-sm hover:bg-gray-50 transition-all flex items-center justify-center gap-3 cursor-pointer"
+                >
+                  <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5" alt="google" />
+                  <span>Google Account দিয়ে প্রবেশ</span>
+                </button>
+              </div>
+            )}
           </div>
-          <h1 className="text-4xl font-extrabold text-gray-900 mb-3 tracking-tight">ISP RADIAL</h1>
-          <p className="text-gray-500 mb-10 leading-relaxed">Management Information System for Modern ISPs.</p>
           
-          <div className="space-y-4">
-            <button 
-              onClick={handleLogin}
-              className="w-full bg-[#002d2d] text-white py-4 rounded-2xl font-bold hover:bg-[#003d3d] transition-all flex items-center justify-center gap-4 shadow-xl hover:shadow-[#002d2d]/20 active:scale-95"
-            >
-              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-6 h-6 bg-white rounded-full p-0.5" alt="google" />
-              Sign in with Google
-            </button>
-            <p className="text-[10px] text-gray-400 uppercase tracking-widest font-bold">Authorized Access Only</p>
+          <div className="mt-8 text-center border-t border-gray-100 pt-6">
+            <p className="text-[10px] text-gray-400 uppercase tracking-widest font-black flex items-center justify-center gap-1">
+              <ShieldAlert size={10} className="text-emerald-500" />
+              <span>আইটি সহায়তা সেল: +৮৮০১৭০০০০০০০০</span>
+            </p>
           </div>
         </motion.div>
       </div>
     );
+  }
+
+  if (user && user.role === 'customer') {
+    return <CustomerPortalView customerId={user.customerId} onLogout={handleLogout} />;
   }
 
   return (
@@ -268,29 +622,6 @@ export default function App() {
             icon={<LayoutDashboard size={20} />} 
             label="Dashboard" 
           />
-
-          {/* HR Admin Menu */}
-          {hasPermission('HR Admin', 'read') && (
-            <div className="space-y-1">
-              <button 
-                onClick={() => toggleMenu('hr')}
-                className="w-full flex items-center justify-between gap-3 px-4 py-3.5 rounded-xl text-white/50 hover:text-white hover:bg-white/5 transition-all text-sm font-semibold"
-              >
-                <div className="flex items-center gap-3">
-                  <ShieldCheck size={20} className="text-emerald-400/60" />
-                  <span>Admin Control</span>
-                </div>
-                <ChevronDown size={16} className={cn("transition-transform duration-300", expandedMenus.hr && "rotate-180")} />
-              </button>
-              {expandedMenus.hr && (
-                <div className="ml-4 space-y-1 border-l-2 border-white/5 pl-4 mt-1">
-                  <SubNavItem active={view === 'role-control'} onClick={() => { setView('role-control'); setIsSidebarOpen(false); }} label="Permissions" />
-                  <SubNavItem active={view === 'add-admin'} onClick={() => { setView('add-admin'); setIsSidebarOpen(false); }} label="Add Admin" />
-                  <SubNavItem active={view === 'manage-admins'} onClick={() => { setView('manage-admins'); setIsSidebarOpen(false); }} label="Admin List" />
-                </div>
-              )}
-            </div>
-          )}
           
           {/* Customers Menu */}
           {hasPermission('Customers', 'read') && (
@@ -453,12 +784,13 @@ export default function App() {
                 key="customer-profile"
                 customer={selectedProfileCustomer}
                 transactions={transactions}
+                packages={packages}
                 onBack={() => setView('all-customers')}
               />
             )}
             {view === 'create-user' && <UserFormView key="create-user" packages={packages} onComplete={() => setView('all-customers')} />}
             {view === 'edit-user' && <UserFormView key="edit-user" packages={packages} initialData={editingCustomer} onComplete={() => setView('all-customers')} />}
-            {view === 'single-recharge' && <SingleRechargeView key="single-recharge" customers={customers} onComplete={() => setView('manage-recharge')} />}
+            {view === 'single-recharge' && <SingleRechargeView key="single-recharge" customers={customers} packages={packages} onComplete={() => setView('manage-recharge')} />}
             {view === 'edit-recharge' && (
               <EditRechargeView 
                 key="edit-recharge" 
@@ -498,7 +830,7 @@ export default function App() {
             {view === 'add-admin' && <AdminFormView key="add-admin" onComplete={() => setView('manage-admins')} />}
             {view === 'manage-admins' && <AdminListView key="manage-admins" onAdd={() => setView('add-admin')} />}
             {view === 'finance' && <FinanceView key="finance" transactions={transactions} financeRecords={financeRecords} hasPermission={hasPermission} />}
-            {view === 'settings' && <SettingsView key="settings" user={user} />}
+            {view === 'settings' && <SettingsView key="settings" user={user} hasPermission={hasPermission} />}
             
             {!['dashboard', 'all-customers', 'manage-client', 'customer-profile', 'create-user', 'edit-user', 'single-recharge', 'edit-recharge', 'manage-recharge', 'packages', 'create-package', 'edit-package', 'settings', 'role-control', 'add-admin', 'manage-admins', 'finance'].includes(view) && (
               <div className="h-[60vh] flex flex-col items-center justify-center text-gray-400 bg-white rounded-3xl border border-dashed border-gray-200">
@@ -550,7 +882,17 @@ function SubNavItem({ active, onClick, label, disabled, onClickOverride }: { act
 
 // Sub-views
 function DashboardView({ customers, transactions, packages }: { customers: Customer[]; transactions: Transaction[]; packages: Package[] }) {
-  const monthlyExpected = customers.reduce((acc, c) => acc + (c.monthlyBill || 0), 0);
+  const monthlyExpected = customers.reduce((acc, c) => {
+    let bill = c.monthlyBill || 0;
+    if (bill === 0) {
+      const pkg = packages.find(p => 
+        p.id === c.packageId || 
+        p.name.toLowerCase().replace(/[\s._-]+/g, '') === (c.packageName || '').toLowerCase().replace(/[\s._-]+/g, '')
+      );
+      bill = pkg?.price || 0;
+    }
+    return acc + bill;
+  }, 0);
   const totalPaid = transactions.filter(tx => tx.status === 'paid').reduce((acc, tx) => acc + (tx.amount || 0), 0);
   const totalDue = Math.max(0, monthlyExpected - totalPaid);
 
@@ -1021,7 +1363,7 @@ function UserFormView({ packages, initialData, onComplete }: { packages: Package
   );
 }
 
-function SingleRechargeView({ customers, onComplete }: { customers: Customer[]; onComplete: () => void }) {
+function SingleRechargeView({ customers, packages, onComplete }: { customers: Customer[]; packages: Package[]; onComplete: () => void }) {
   const [formData, setFormData] = useState({
     customerId: '',
     amount: 0,
@@ -1039,7 +1381,7 @@ function SingleRechargeView({ customers, onComplete }: { customers: Customer[]; 
     const cust = customers.find(c => c.id === formData.customerId);
     if (cust) {
       setSelectedCustomer(cust);
-      setFormData(prev => ({ ...prev, amount: cust.monthlyBill || 0 }));
+      setFormData(prev => ({ ...prev, amount: cust.monthlyBill || packages.find(p => p.id === cust.packageId || p.name.toLowerCase().replace(/[\s._-]+/g, '') === (cust.packageName || '').toLowerCase().replace(/[\s._-]+/g, ''))?.price || 0 }));
     } else {
       setSelectedCustomer(null);
     }
@@ -1603,7 +1945,7 @@ function EditRechargeView({ transaction, customers, onComplete }: { transaction:
   );
 }
 
-function CustomerProfileView({ customer, transactions, onBack }: { customer: Customer | null; transactions: Transaction[]; onBack: () => void }) {
+function CustomerProfileView({ customer, transactions, packages, onBack }: { customer: Customer | null; transactions: Transaction[]; packages: Package[]; onBack: () => void }) {
   if (!customer) return null;
 
   const customerTransactions = transactions.filter(tx => tx.customerId === customer.id || tx.customerId === customer.username);
@@ -1683,7 +2025,7 @@ function CustomerProfileView({ customer, transactions, onBack }: { customer: Cus
             <DetailRow icon={<MapPin size={18} />} label="Mac Address" value={customer.macAddress || '98:BA:5F:32:65:21'} />
             <DetailRow icon={<Globe size={18} />} label="IP Address" value={customer.ipAddress || '10.10.15.195'} />
             <DetailRow icon={<Calendar size={18} />} label="Expiration Date" value={customer.expiryDate ? new Date(customer.expiryDate).toLocaleDateString('en-CA') : '2026-05-15'} />
-            <DetailRow icon={<DollarSign size={18} />} label="Monthly Rent" value={(customer.monthlyBill || 0).toFixed(2)} />
+            <DetailRow icon={<DollarSign size={18} />} label="Monthly Rent" value={(customer.monthlyBill || packages.find(p => p.id === customer.packageId || p.name.toLowerCase().replace(/[\s._-]+/g, '') === (customer.packageName || '').toLowerCase().replace(/[\s._-]+/g, ''))?.price || 0).toFixed(2)} />
           </div>
         </div>
 
@@ -1823,16 +2165,82 @@ function BulkImportModal({
             const rowIndex = i + j + 1;
             
             try {
-              // Flexible mapping
-              const username = findVal(row, 'userid') || findVal(row, 'username') || findVal(row, 'idno') || `user_${Date.now()}_${i + j}`;
-              const name = findVal(row, 'customername') || findVal(row, 'name') || username || 'Unknown';
-              const phone = findVal(row, 'mobile') || findVal(row, 'phone') || '';
-              const address = findVal(row, 'address') || '';
-              const packageName = findVal(row, 'pkg') || findVal(row, 'package') || '';
-              const rentStr = findVal(row, 'rent') || '0';
-              const rent = parseFloat(rentStr.replace(/[^0-9.]/g, '')) || 0;
-              const statusStr = (findVal(row, 'status') || 'active').toLowerCase();
-              const expireDateStr = findVal(row, 'expdate') || findVal(row, 'expire') || '';
+              // Flexible mapping with comprehensive fallback checks for all potential headers
+              const username = 
+                findVal(row, 'userid') || 
+                findVal(row, 'username') || 
+                findVal(row, 'idno') || 
+                findVal(row, 'id_no') || 
+                findVal(row, 'clientid') || 
+                findVal(row, 'customerid') || 
+                findVal(row, 'loginid') || 
+                findVal(row, 'login') || 
+                findVal(row, 'user') || 
+                `user_${Date.now()}_${i + j}`;
+
+              const name = 
+                findVal(row, 'customername') || 
+                findVal(row, 'name') || 
+                findVal(row, 'clientname') || 
+                findVal(row, 'fullname') || 
+                findVal(row, 'customer') || 
+                findVal(row, 'client') || 
+                username || 
+                'Unknown';
+
+              const phone = 
+                findVal(row, 'mobile') || 
+                findVal(row, 'phone') || 
+                findVal(row, 'contact') || 
+                findVal(row, 'mobilenumber') || 
+                findVal(row, 'phonenumber') || 
+                findVal(row, 'contactnumber') || 
+                findVal(row, 'cell') || 
+                '';
+
+              const address = 
+                findVal(row, 'address') || 
+                findVal(row, 'location') || 
+                findVal(row, 'zone') || 
+                findVal(row, 'area') || 
+                '';
+
+              const packageName = 
+                findVal(row, 'pkg') || 
+                findVal(row, 'package') || 
+                findVal(row, 'packagename') || 
+                findVal(row, 'plan') || 
+                findVal(row, 'speed') || 
+                '';
+
+              const rentStr = 
+                findVal(row, 'rent') || 
+                findVal(row, 'bill') || 
+                findVal(row, 'monthlybill') || 
+                findVal(row, 'monthly_bill') ||
+                findVal(row, 'price') || 
+                findVal(row, 'pkgprice') || 
+                findVal(row, 'packageprice') || 
+                findVal(row, 'charge') || 
+                findVal(row, 'rate') || 
+                findVal(row, 'amount') || 
+                '0';
+
+              let rent = parseFloat(rentStr.replace(/[^0-9.]/g, '')) || 0;
+
+              const statusStr = (
+                findVal(row, 'status') || 
+                findVal(row, 'state') || 
+                findVal(row, 'condition') || 
+                'active'
+              ).toLowerCase();
+
+              const expireDateStr = 
+                findVal(row, 'expdate') || 
+                findVal(row, 'expire') || 
+                findVal(row, 'expiry') || 
+                findVal(row, 'expirydate') || 
+                '';
               
               let formattedExpiryDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
               if (expireDateStr) {
@@ -1850,7 +2258,19 @@ function BulkImportModal({
                 }
               }
               
-              const pkg = packages.find(p => p.name.toLowerCase().replace(/[\s._-]+/g, '') === packageName.toLowerCase().replace(/[\s._-]+/g, ''));
+              // Normalize and try alternate patterns to find a matching package plan
+              const cleanPackageName = packageName.toLowerCase().replace(/[\s._-]+/g, '');
+              const pkg = packages.find(p => {
+                const cleanPName = p.name.toLowerCase().replace(/[\s._-]+/g, '');
+                return cleanPName === cleanPackageName || 
+                       cleanPackageName.includes(cleanPName) || 
+                       cleanPName.includes(cleanPackageName);
+              });
+
+              // Fallback: If parsed rent/monthly bill is 0, auto-derive it from matched package plan's standard price!
+              if (rent === 0 && pkg) {
+                rent = pkg.price || 0;
+              }
               
               const docRef = doc(collection(db, 'customers'));
               batch.set(docRef, {
@@ -2011,15 +2431,32 @@ function CustomersView({ customers, packages, onCreateUser, onEditUser, onViewPr
   
   const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
   const [showBulkImport, setShowBulkImport] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
-  const handleDelete = async (id: string, name: string) => {
-    if (confirm(`Are you sure you want to remove customer "${name}"? This action cannot be undone.`)) {
-      try {
-        await deleteDoc(doc(db, 'customers', id));
-      } catch (err) {
-        console.error("Failed to delete customer", err);
-      }
+  const [deleteModal, setDeleteModal] = useState<{
+    isOpen: boolean;
+    type: 'single' | 'bulk';
+    id?: string;
+    name?: string;
+    ids?: string[];
+  }>({ isOpen: false, type: 'single' });
+
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 4000);
+      return () => clearTimeout(timer);
     }
+  }, [toast]);
+
+  const handleDelete = (id: string, name: string) => {
+    setDeleteModal({
+      isOpen: true,
+      type: 'single',
+      id,
+      name
+    });
   };
 
   const toggleStatus = async (id: string, currentStatus: string) => {
@@ -2079,6 +2516,66 @@ function CustomersView({ customers, packages, onCreateUser, onEditUser, onViewPr
     return matchesSearch && matchesStatus && matchesArea && matchesPackage && matchesDues;
   });
 
+  const isAllSelected = filteredCustomers.length > 0 && filteredCustomers.every(c => c.id && selectedIds.includes(c.id));
+
+  const toggleSelectAll = () => {
+    const filteredIds = filteredCustomers.map(c => c.id).filter((id): id is string => !!id);
+    if (isAllSelected) {
+      setSelectedIds(prev => prev.filter(id => !filteredIds.includes(id)));
+    } else {
+      setSelectedIds(prev => {
+        const union = new Set([...prev, ...filteredIds]);
+        return Array.from(union);
+      });
+    }
+  };
+
+  const toggleSelectOne = (id: string | undefined) => {
+    if (!id) return;
+    setSelectedIds(prev => 
+      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleBulkDelete = () => {
+    const validIds = selectedIds.filter(Boolean);
+    if (validIds.length === 0) return;
+    setDeleteModal({
+      isOpen: true,
+      type: 'bulk',
+      ids: validIds
+    });
+  };
+
+  const confirmDelete = async () => {
+    if (deleteModal.type === 'single' && deleteModal.id) {
+      const { id } = deleteModal;
+      try {
+        await deleteDoc(doc(db, 'customers', id));
+        setSelectedIds(prev => prev.filter(item => item !== id));
+        setToast({ message: "কাস্টমার সফলভাবে ডিলিট করা হয়েছে।", type: "success" });
+      } catch (err) {
+        console.error("Failed to delete customer", err);
+        setToast({ message: "কাস্টমার ডিলিট করতে সমস্যা হয়েছে। দয়া করে আপনার পারমিশন চেক করুন।", type: "error" });
+        handleFirestoreError(err, 'delete', 'customers');
+      }
+    } else if (deleteModal.type === 'bulk' && deleteModal.ids) {
+      const { ids } = deleteModal;
+      try {
+        await Promise.all(
+          ids.map(id => deleteDoc(doc(db, 'customers', id)))
+        );
+        setSelectedIds([]);
+        setToast({ message: "কাস্টমারগুলো সফলভাবে ডিলিট করা হয়েছে।", type: "success" });
+      } catch (err) {
+        console.error("Bulk deletion failed", err);
+        setToast({ message: "কাস্টমার ডিলিট করতে সমস্যা হয়েছে। দয়া করে আপনার পারমিশন চেক করুন।", type: "error" });
+        handleFirestoreError(err, 'delete', 'customers');
+      }
+    }
+    setDeleteModal({ isOpen: false, type: 'single' });
+  };
+
   const areas = Array.from(new Set(customers.map(c => c.area || c.address?.split(',')[0] || 'Main Area').filter(Boolean)));
   const packageOptions = Array.from(new Set([
     ...packages.map(p => p.name),
@@ -2124,6 +2621,14 @@ function CustomersView({ customers, packages, onCreateUser, onEditUser, onViewPr
           <div className="bg-[#002d2d]/5 text-[#002d2d] px-4 py-2 rounded-2xl text-xs font-bold border border-[#002d2d]/10">
             Filtered Client: <span className="text-emerald-600 font-extrabold">{filteredCustomers.length}</span> / {customers.length} Total
           </div>
+          {selectedIds.length > 0 && (
+            <button 
+              onClick={handleBulkDelete}
+              className="bg-red-600 hover:bg-red-700 text-white px-5 py-2 rounded-xl text-sm font-bold flex items-center gap-2 shadow-lg transition-all active:scale-95 animate-pulse"
+            >
+              <Trash2 size={16} /> একসাথে মুছুন ({selectedIds.length})
+            </button>
+          )}
           <button 
             onClick={onCreateUser}
             className="bg-[#002d2d] text-white px-6 py-2 rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-[#003d3d] shadow-lg transition-all active:scale-95"
@@ -2230,9 +2735,23 @@ function CustomersView({ customers, packages, onCreateUser, onEditUser, onViewPr
           <table className="w-full text-left min-w-[1200px]">
             <thead>
               <tr className="border-b border-gray-700">
-                <th className="px-4 py-4 text-[11px] font-bold text-gray-400 uppercase tracking-wider text-center">
-                  <input type="checkbox" className="rounded" />
-                  <div className="mt-1">ALL</div>
+                <th 
+                  className="px-4 py-4 text-[11px] font-bold text-gray-400 uppercase tracking-wider text-center cursor-pointer select-none"
+                  onClick={() => toggleSelectAll()}
+                >
+                  <div className="flex flex-col items-center justify-center gap-1">
+                    <input 
+                      type="checkbox" 
+                      className="rounded cursor-pointer" 
+                      checked={isAllSelected}
+                      onChange={(e) => {
+                        e.stopPropagation();
+                        toggleSelectAll();
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    <span>ALL</span>
+                  </div>
                 </th>
                 <th className="px-4 py-4 text-[11px] font-bold text-gray-400 uppercase tracking-wider">ID NO</th>
                 <th className="px-4 py-4 text-[11px] font-bold text-gray-400 uppercase tracking-wider">USER ID</th>
@@ -2253,8 +2772,20 @@ function CustomersView({ customers, packages, onCreateUser, onEditUser, onViewPr
             <tbody className="divide-y divide-gray-700 bg-white">
               {filteredCustomers.map((customer, index) => (
                 <tr key={customer.id} className="hover:bg-gray-50 transition-colors">
-                  <td className="px-4 py-3 text-center">
-                    <input type="checkbox" className="rounded" />
+                  <td 
+                    className="px-4 py-3 text-center cursor-pointer select-none"
+                    onClick={() => toggleSelectOne(customer.id)}
+                  >
+                    <input 
+                      type="checkbox" 
+                      className="rounded cursor-pointer" 
+                      checked={!!customer.id && selectedIds.includes(customer.id)}
+                      onChange={(e) => {
+                        e.stopPropagation();
+                        toggleSelectOne(customer.id);
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    />
                   </td>
                   <td className="px-4 py-3 text-sm text-gray-600">{1200 + index}</td>
                   <td className="px-4 py-3">
@@ -2274,7 +2805,9 @@ function CustomersView({ customers, packages, onCreateUser, onEditUser, onViewPr
                     {customer.address || '--'}
                   </td>
                   <td className="px-4 py-3 text-xs font-bold text-gray-600 uppercase">{customer.packageName?.split('-')[0]}</td>
-                  <td className="px-4 py-3 text-sm text-gray-600">{customer.monthlyBill}</td>
+                  <td className="px-4 py-3 text-sm text-gray-600 font-medium">
+                    ৳{(customer.monthlyBill || packages.find(p => p.id === customer.packageId || p.name.toLowerCase().replace(/[\s._-]+/g,'') === (customer.packageName || '').toLowerCase().replace(/[\s._-]+/g,''))?.price || 0).toLocaleString()}
+                  </td>
                   <td className="px-4 py-3">
                     <span className="bg-[#b3e5fc] text-[#0288d1] px-2 py-0.5 rounded text-[11px] font-bold">
                       {index % 3 === 0 ? '700' : '0'}
@@ -2387,6 +2920,100 @@ function CustomersView({ customers, packages, onCreateUser, onEditUser, onViewPr
           </table>
         </div>
       </div>
+
+      {/* Custom Confirmation Modal */}
+      <AnimatePresence>
+        {deleteModal.isOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setDeleteModal({ isOpen: false, type: 'single' })}
+              className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+
+            {/* Modal Body */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              transition={{ type: "spring", duration: 0.4 }}
+              className="relative w-full max-w-md bg-white rounded-3xl p-6 shadow-2xl border border-gray-150 overflow-hidden text-center z-10"
+            >
+              <div className="absolute top-4 right-4">
+                <button 
+                  onClick={() => setDeleteModal({ isOpen: false, type: 'single' })}
+                  className="p-1.5 hover:bg-gray-100 rounded-full text-gray-500 transition-colors"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Top Warning Icon block */}
+              <div className="w-16 h-16 bg-red-550/10 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-red-100">
+                <ShieldAlert className="w-8 h-8 text-red-500 animate-pulse" />
+              </div>
+
+              {/* Title */}
+              <h3 className="text-xl font-bold text-gray-900 mb-2">আপনি কি নিশ্চিত?</h3>
+              <p className="text-sm text-gray-600 mb-6 leading-relaxed">
+                {deleteModal.type === 'single' ? (
+                  <>কাস্টমার <strong className="text-red-500 font-bold">"{deleteModal.name}"</strong> কে চিরতরে মুছে ফেলা শুরু হবে। এই সিদ্ধান্ত আর ফেরত আনা যাবে না।</>
+                ) : (
+                  <>আপনি মোট <strong className="text-red-550 font-bold">{deleteModal.ids?.length} জন</strong> কাস্টমার ডিলিট করতে যাচ্ছেন। এই পদক্ষেপ আর ফেরত আনা যাবে না।</>
+                )}
+              </p>
+
+              {/* Action buttons */}
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setDeleteModal({ isOpen: false, type: 'single' })}
+                  className="flex-1 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-bold transition-all active:scale-95 text-sm"
+                >
+                  না, ফিরে যান
+                </button>
+                <button
+                  onClick={confirmDelete}
+                  className="flex-1 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold transition-all active:scale-95 text-sm shadow-lg shadow-red-600/20"
+                >
+                  হ্যাঁ, ডিলিট করুন
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Toast Notification */}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: -20, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -20, scale: 0.9 }}
+            className={`fixed top-6 left-1/2 -translate-x-1/2 z-[110] flex items-center gap-3 px-6 py-3.5 rounded-2xl shadow-xl border text-sm font-bold ${
+              toast.type === 'success' 
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                : 'bg-red-50 border-red-200 text-red-800'
+            }`}
+          >
+            {toast.type === 'success' ? (
+              <CheckCircle className="w-5 h-5 text-emerald-500" />
+            ) : (
+              <AlertCircle className="w-5 h-5 text-red-500" />
+            )}
+            <span>{toast.message}</span>
+            <button 
+              onClick={() => setToast(null)}
+              className="ml-2 hover:opacity-75 transition-opacity"
+            >
+              <X size={14} />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -2402,14 +3029,21 @@ function BillingView({ transactions, customers, onEdit }: { transactions: Transa
   const [selectedInvoiceTx, setSelectedInvoiceTx] = useState<Transaction | null>(null);
   const [selectedInvoiceNumber, setSelectedInvoiceNumber] = useState<number>(0);
 
-  const handleDelete = async (id: string) => {
-    if (confirm('Are you sure you want to remove this recharge record?')) {
+  const [deleteDialog, setDeleteDialog] = useState<{ isOpen: boolean; id: string | null }>({ isOpen: false, id: null });
+
+  const handleDelete = (id: string) => {
+    setDeleteDialog({ isOpen: true, id });
+  };
+
+  const confirmDelete = async () => {
+    if (deleteDialog.id) {
       try {
-        await deleteDoc(doc(db, 'transactions', id));
+        await deleteDoc(doc(db, 'transactions', deleteDialog.id));
       } catch (err) {
         console.error("Failed to delete transaction", err);
       }
     }
+    setDeleteDialog({ isOpen: false, id: null });
   };
 
   const filteredTransactions = transactions.filter(tx => {
@@ -2791,19 +3425,87 @@ function BillingView({ transactions, customers, onEdit }: { transactions: Transa
           </div>
         )}
       </AnimatePresence>
+
+      {/* Custom Confirmation Modal for Billing Record */}
+      <AnimatePresence>
+        {deleteDialog.isOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setDeleteDialog({ isOpen: false, id: null })}
+              className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+
+            {/* Modal Body */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              transition={{ type: "spring", duration: 0.4 }}
+              className="relative w-full max-w-md bg-white rounded-3xl p-6 shadow-2xl border border-gray-150 overflow-hidden text-center z-10"
+            >
+              <div className="absolute top-4 right-4">
+                <button 
+                  onClick={() => setDeleteDialog({ isOpen: false, id: null })}
+                  className="p-1.5 hover:bg-gray-100 rounded-full text-gray-500 transition-colors"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Top Warning Icon block */}
+              <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-red-100">
+                <ShieldAlert className="w-8 h-8 text-red-500 animate-pulse" />
+              </div>
+
+              {/* Title */}
+              <h3 className="text-xl font-bold text-gray-900 mb-2">Are you sure?</h3>
+              <p className="text-sm text-gray-600 mb-6 leading-relaxed">
+                Are you sure you want to remove this recharge record? This action cannot be undone.
+              </p>
+
+              {/* Action buttons */}
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setDeleteDialog({ isOpen: false, id: null })}
+                  className="flex-1 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-bold transition-all active:scale-95 text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDelete}
+                  className="flex-1 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold transition-all active:scale-95 text-sm shadow-lg shadow-red-600/20"
+                >
+                  Confirm Delete
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
 function PackagesView({ packages, onAdd, onEdit }: { packages: Package[]; onAdd: () => void; onEdit: (pkg: Package) => void }) {
-  const handleDelete = async (id: string, name: string) => {
-    if (confirm(`Are you sure you want to delete the package "${name}"? This will not affect existing customers but they will be linked to a missing package ID.`)) {
+  const [deleteDialog, setDeleteDialog] = useState<{ isOpen: boolean; id: string | null; name: string | null }>({ isOpen: false, id: null, name: null });
+
+  const handleDelete = (id: string, name: string) => {
+    setDeleteDialog({ isOpen: true, id, name });
+  };
+
+  const confirmDelete = async () => {
+    if (deleteDialog.id) {
       try {
-        await deleteDoc(doc(db, 'packages', id));
+        await deleteDoc(doc(db, 'packages', deleteDialog.id));
       } catch (err) {
         console.error(err);
       }
     }
+    setDeleteDialog({ isOpen: false, id: null, name: null });
   };
 
   const getPackageIcon = (speed: string) => {
@@ -2902,49 +3604,221 @@ function PackagesView({ packages, onAdd, onEdit }: { packages: Package[]; onAdd:
           </div>
         ))}
       </motion.div>
+
+      {/* Custom Confirmation Modal for Package Record */}
+      <AnimatePresence>
+        {deleteDialog.isOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            {/* Backdrop */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setDeleteDialog({ isOpen: false, id: null, name: null })}
+              className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+
+            {/* Modal Body */}
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              transition={{ type: "spring", duration: 0.4 }}
+              className="relative w-full max-w-md bg-white rounded-3xl p-6 shadow-2xl border border-gray-150 overflow-hidden text-center z-10"
+            >
+              <div className="absolute top-4 right-4">
+                <button 
+                  onClick={() => setDeleteDialog({ isOpen: false, id: null, name: null })}
+                  className="p-1.5 hover:bg-gray-100 rounded-full text-gray-500 transition-colors"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Top Warning Icon block */}
+              <div className="w-16 h-16 bg-red-50 rounded-2xl flex items-center justify-center mx-auto mb-4 border border-red-100">
+                <ShieldAlert className="w-8 h-8 text-red-500 animate-pulse" />
+              </div>
+
+              {/* Title */}
+              <h3 className="text-xl font-bold text-gray-900 mb-2">Are you sure?</h3>
+              <p className="text-sm text-gray-600 mb-6 leading-relaxed">
+                Are you sure you want to delete the package <strong className="text-red-650 font-bold">"{deleteDialog.name}"</strong>? This will not affect existing customers but they will be linked to a missing package.
+              </p>
+
+              {/* Action buttons */}
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setDeleteDialog({ isOpen: false, id: null, name: null })}
+                  className="flex-1 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl font-bold transition-all active:scale-95 text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDelete}
+                  className="flex-1 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold transition-all active:scale-95 text-sm shadow-lg shadow-red-600/20"
+                >
+                  Confirm Delete
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
 
-function SettingsView({ user }: { user: any }) {
+function SettingsView({ user, hasPermission }: { user: any; hasPermission: (module: string, action: 'read' | 'create' | 'edit' | 'delete') => boolean }) {
+  const [activeTab, setActiveTab] = useState<'system' | 'permissions' | 'admins'>('system');
+  const [showAddAdmin, setShowAddAdmin] = useState(false);
+
+  const canAccessHR = hasPermission('HR Admin', 'read');
+
   return (
     <motion.div 
       initial={{ opacity: 0, scale: 0.95 }}
       animate={{ opacity: 1, scale: 1 }}
       className="max-w-4xl mx-auto space-y-6"
     >
-      <div className="bg-white p-8 rounded-3xl shadow-sm border border-gray-100">
-        <h3 className="text-2xl font-bold text-gray-900 mb-6">System Settings</h3>
-        
-        <div className="space-y-8">
-          <section>
-            <h4 className="flex items-center gap-2 text-lg font-bold text-gray-900 mb-4">
-              <Activity className="text-[#002d2d]" size={18} />
-              ISP Configuration
-            </h4>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100">
-                <p className="text-xs font-bold text-gray-400 uppercase mb-1">Company Name</p>
-                <p className="font-bold text-gray-900">ISP RADIAL</p>
-              </div>
-              <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100">
-                <p className="text-xs font-bold text-gray-400 uppercase mb-1">Contact Email</p>
-                <p className="font-bold text-gray-900">{user?.email}</p>
-              </div>
-            </div>
-          </section>
-
-          <section className="p-6 bg-[#002d2d] rounded-3xl text-white">
-            <h4 className="text-lg font-bold mb-2">Need help?</h4>
-            <p className="text-white/70 text-sm mb-4">
-              Contact support for dedicated MikroTik integration or custom features for your ISP business.
-            </p>
-            <button className="px-6 py-2 bg-emerald-400 text-[#002d2d] rounded-xl font-bold hover:bg-emerald-300 transition-colors">
-              Contact Support
+      {/* settings tab navigation */}
+      <div className="bg-white p-2 rounded-2xl flex border border-gray-100 shadow-sm gap-1">
+        <button
+          onClick={() => setActiveTab('system')}
+          className={cn(
+            "flex-1 py-3 text-sm font-bold rounded-xl transition-all",
+            activeTab === 'system' ? "bg-[#002d2d] text-white" : "text-gray-500 hover:text-[#002d2d] hover:bg-gray-50"
+          )}
+        >
+          General Settings
+        </button>
+        {canAccessHR && (
+          <>
+            <button
+              onClick={() => setActiveTab('permissions')}
+              className={cn(
+                "flex-1 py-3 text-sm font-bold rounded-xl transition-all",
+                activeTab === 'permissions' ? "bg-[#002d2d] text-white" : "text-gray-500 hover:text-[#002d2d] hover:bg-gray-50"
+              )}
+            >
+              Role & Permissions
             </button>
-          </section>
-        </div>
+            <button
+              onClick={() => {
+                setActiveTab('admins');
+                setShowAddAdmin(false);
+              }}
+              className={cn(
+                "flex-1 py-3 text-sm font-bold rounded-xl transition-all",
+                activeTab === 'admins' ? "bg-[#002d2d] text-white" : "text-gray-500 hover:text-[#002d2d] hover:bg-gray-50"
+              )}
+            >
+              Admin List
+            </button>
+          </>
+        )}
       </div>
+
+      {activeTab === 'system' && (
+        <div className="bg-white p-8 rounded-3xl shadow-sm border border-gray-100">
+          <h3 className="text-2xl font-bold text-gray-900 mb-6">System Settings</h3>
+          
+          <div className="space-y-8">
+            <section>
+              <h4 className="flex items-center gap-2 text-lg font-bold text-gray-900 mb-4">
+                <Activity className="text-[#002d2d]" size={18} />
+                ISP Configuration
+              </h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100">
+                  <p className="text-xs font-bold text-gray-400 uppercase mb-1">Company Name</p>
+                  <p className="font-bold text-gray-900">ISP RADIAL</p>
+                </div>
+                <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100">
+                  <p className="text-xs font-bold text-gray-400 uppercase mb-1">Contact Email</p>
+                  <p className="font-bold text-gray-900">{user?.email}</p>
+                </div>
+              </div>
+            </section>
+
+            <section className="pt-6 border-t border-gray-100">
+              <h4 className="flex items-center gap-2 text-lg font-bold text-gray-900 mb-4">
+                <ShieldCheck className="text-[#002d2d]" size={18} />
+                নিরাপত্তা ও লগইন সিস্টেম নিয়ন্ত্রণ (Login & Access Systems)
+              </h4>
+              <p className="text-gray-500 text-sm mb-4 leading-relaxed">
+                এই সিস্টেমে দুই স্তরের অ্যাক্সেস কন্ট্রোল বলবৎ রয়েছে। স্টাফ/এডমিনরা সম্পূর্ণ ড্যাশবোর্ড এবং সংযোগ নিয়ন্ত্রণ করতে পারেন, এবং সাধারণ গ্রাহকরা তাদের বিল ও মেয়াদ দেখতে পারেন।
+              </p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <div className="p-5 bg-emerald-50 rounded-2xl border border-emerald-100 flex items-start gap-3 text-left">
+                  <ShieldCheck size={24} className="text-emerald-600 mt-1" />
+                  <div>
+                    <h5 className="font-bold text-emerald-800 text-sm">সিস্টেম ইউজার ও এডমিন</h5>
+                    <p className="text-xs text-emerald-700 mt-1 leading-relaxed">
+                      অনুমোদিত স্টাফ/এডমিনরা সম্পূর্ণ সিস্টেমের টোটাল কন্ট্রোল পাবেন। তাঁরা গ্রাহক ডাটাবেজ, বিলিং, ফিন্যান্স লেজার ও রিচার্জ নিয়ন্ত্রণ করতে পারেন।
+                    </p>
+                  </div>
+                </div>
+                
+                <div className="p-5 bg-indigo-50 rounded-2xl border border-indigo-100 flex items-start gap-3 text-left">
+                  <User size={24} className="text-indigo-600 mt-1" />
+                  <div>
+                    <h5 className="font-bold text-indigo-800 text-sm">সাধারণ গ্রাহক / ইউজার পোর্টাল</h5>
+                    <p className="text-xs text-indigo-700 mt-1 leading-relaxed">
+                      গ্রাহকরা তাদের নির্দিষ্ট <b>User ID / Username</b> ও পাসওয়ার্ড দিয়ে গ্রাহক পোর্টালে লগইন করতে পারবেন। তাঁরা শুধু নিজ একাউন্ট ব্যবহার করতে পারবেন এবং রিচার্জ রিকোয়েস্ট দিতে পারবেন।
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Dummy logins checklist for testing */}
+              <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 text-left">
+                <h5 className="font-bold text-slate-800 text-xs uppercase tracking-wider mb-3">লগইন টেস্ট করার ক্রেডেনশিয়াল গাইড (Demo Credentials)</h5>
+                <p className="text-xs text-slate-500 mb-3">গ্রাহকরা পাসওয়ার্ড নিজে সেট করতে পারেন গ্রাহক ফর্ম থেকে। বাই-ডিফল্ট তাদের ইউজারনেম-ই তাদের পাসওয়ার্ড হিসেবে সেট থাকে:</p>
+                <div className="space-y-2 text-xs text-slate-600 font-mono">
+                  <div className="flex justify-between p-2.5 bg-white rounded-lg border border-slate-150">
+                    <span>স্টাফ অ্যাডমিন (Google Auth Account):</span>
+                    <span className="font-bold text-slate-800">Email: Google Sign In</span>
+                  </div>
+                  <div className="flex justify-between p-2.5 bg-white rounded-lg border border-slate-150">
+                    <span>গ্রাহক ১ (User Rahim):</span>
+                    <span className="font-bold text-indigo-800">User ID: rahim01 | Pass: rahim01</span>
+                  </div>
+                  <div className="flex justify-between p-2.5 bg-white rounded-lg border border-slate-150">
+                    <span>গ্রাহক ২ (User Karim):</span>
+                    <span className="font-bold text-indigo-800">User ID: karim_u | Pass: karim_u</span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="p-6 bg-[#002d2d] rounded-3xl text-white text-left">
+              <h4 className="text-lg font-bold mb-2">Need help?</h4>
+              <p className="text-white/70 text-sm mb-4">
+                Contact support for dedicated MikroTik integration or custom features for your ISP business.
+              </p>
+              <button className="px-6 py-2 bg-emerald-400 text-[#002d2d] rounded-xl font-bold hover:bg-emerald-300 transition-colors">
+                Contact Support
+              </button>
+            </section>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'permissions' && canAccessHR && (
+        <RoleControlView />
+      )}
+
+      {activeTab === 'admins' && canAccessHR && (
+        <>
+          {showAddAdmin ? (
+            <AdminFormView onComplete={() => setShowAddAdmin(false)} />
+          ) : (
+            <AdminListView onAdd={() => setShowAddAdmin(true)} />
+          )}
+        </>
+      )}
     </motion.div>
   );
 }
@@ -2982,6 +3856,8 @@ function RoleControlView() {
         setSelectedRoleId(rolesData[0].id);
       }
       setLoading(false);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'roles');
     });
     return () => unsub();
   }, []);
@@ -3311,6 +4187,8 @@ function AdminFormView({ onComplete }: { onComplete: () => void }) {
       if (rolesData.length > 0 && !formData.roleId) {
         setFormData(prev => ({ ...prev, roleId: rolesData[0].id }));
       }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'roles');
     });
     return () => unsub();
   }, []);
@@ -3442,12 +4320,16 @@ function AdminListView({ onAdd }: { onAdd: () => void }) {
     // Fetch roles first for lookup
     const unsubRoles = onSnapshot(collection(db, 'roles'), (snapshot) => {
       setRoles(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'roles');
     });
 
     const q = query(collection(db, 'admins'), orderBy('createdAt', 'desc'));
     const unsubAdmins = onSnapshot(q, (snapshot) => {
       setAdmins(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
       setLoading(false);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'admins');
     });
 
     return () => {
@@ -3559,6 +4441,459 @@ function AdminListView({ onAdd }: { onAdd: () => void }) {
               ))}
             </tbody>
           </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CustomerPortalView({ customerId, onLogout }: { customerId: string; onLogout: () => void }) {
+  const [customer, setCustomer] = useState<Customer | null>(null);
+  const [packages, setPackages] = useState<Package[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [loading, setLoading] = useState(true);
+  
+  // Custom states for recharge request
+  const [rechargeMethod, setRechargeMethod] = useState('bKash');
+  const [rechargeAmount, setRechargeAmount] = useState('');
+  const [rechargeTrxId, setRechargeTrxId] = useState('');
+  const [rechargeNote, setRechargeNote] = useState('');
+  const [rechargeLoading, setRechargeLoading] = useState(false);
+  const [rechargeSuccess, setRechargeSuccess] = useState('');
+  const [rechargeError, setRechargeError] = useState('');
+
+  // Setup speed mock test state
+  const [speedVal, setSpeedVal] = useState(0);
+  const [testingSpeed, setTestingSpeed] = useState(false);
+
+  useEffect(() => {
+    if (!customerId) return;
+    
+    // Live subscriber profile
+    const unsubCust = onSnapshot(doc(db, 'customers', customerId), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setCustomer({ id: docSnap.id, ...data } as Customer);
+        if (data.monthlyBill) {
+          setRechargeAmount(String(data.monthlyBill));
+        }
+      }
+      setLoading(false);
+    });
+
+    // Subscribed packages (for reference)
+    const unsubPack = onSnapshot(collection(db, 'packages'), (snap) => {
+      setPackages(snap.docs.map(d => ({ id: d.id, ...d.data() } as Package)));
+    });
+
+    // User's own payment transactions
+    const qTrx = query(collection(db, 'transactions'), where('customerId', '==', customerId), orderBy('date', 'desc'));
+    const unsubTrx = onSnapshot(qTrx, (snap) => {
+      setTransactions(snap.docs.map(d => ({ id: d.id, ...d.data() } as any)));
+    });
+
+    return () => {
+      unsubCust();
+      unsubPack();
+      unsubTrx();
+    };
+  }, [customerId]);
+
+  const handleRequestRecharge = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rechargeAmount || Number(rechargeAmount) <= 0) {
+      setRechargeError('সটীক রিচার্জ পরিমাণ উল্লেখ করুন!');
+      return;
+    }
+    setRechargeError('');
+    setRechargeSuccess('');
+    setRechargeLoading(true);
+
+    try {
+      await addDoc(collection(db, 'transactions'), {
+        customerId: customerId,
+        customerName: customer?.name || 'Unknown',
+        amount: Number(rechargeAmount),
+        type: 'recharge',
+        method: rechargeMethod,
+        date: Timestamp.now(),
+        status: 'pending',
+        notes: rechargeTrxId ? `TrxID: ${rechargeTrxId}. ${rechargeNote}` : rechargeNote
+      });
+
+      setRechargeSuccess('আপনার পেমেন্ট রিকোয়েস্টটি সফলভাবে জমা হয়েছে এবং এটি পেন্ডিং অবস্থায় রয়েছে! এডমিন অনুমোদন করলে সংযোগ চালু হবে ক্যেটেগরিতে।');
+      setRechargeTrxId('');
+      setRechargeNote('');
+    } catch (err: any) {
+      console.error(err);
+      setRechargeError('অনুরোধ পাঠাতে ব্যর্থ হয়েছে: ' + err.message);
+    } finally {
+      setRechargeLoading(false);
+    }
+  };
+
+  const handleSpeedTest = () => {
+    if (testingSpeed) return;
+    setTestingSpeed(true);
+    setSpeedVal(1);
+    
+    let currentSpeed = 1;
+    const maxSpeed = customer?.packageName?.includes('Premium') ? 50 : customer?.packageName?.includes('Standard') ? 20 : 10;
+    
+    const interval = setInterval(() => {
+      const increment = Math.random() * 8;
+      currentSpeed += increment;
+      if (currentSpeed >= maxSpeed) {
+        currentSpeed = maxSpeed + (Math.random() * 2 - 1);
+        clearInterval(interval);
+        setTestingSpeed(false);
+      }
+      setSpeedVal(Math.round(currentSpeed * 10) / 10);
+    }, 150);
+  };
+
+  if (loading) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-4 border-emerald-500 border-t-transparent mx-auto mb-4" />
+          <p className="text-sm font-bold text-gray-500">গ্রাহক পোর্টাল লোড হচ্ছে...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Calculate days remaining
+  let daysRemaining = 0;
+  let isExpired = true;
+  if (customer?.expiryDate) {
+    const expDate = new Date(customer.expiryDate);
+    const diff = expDate.getTime() - Date.now();
+    daysRemaining = Math.ceil(diff / (1000 * 60 * 60 * 24));
+    isExpired = daysRemaining <= 0;
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans">
+      {/* Top Client Navbar */}
+      <nav className="sticky top-0 bg-[#002d2d] text-white py-4 px-6 md:px-12 flex items-center justify-between z-30 shadow-md">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-emerald-400/20 rounded-xl">
+            <Activity className="w-6 h-6 text-emerald-400" />
+          </div>
+          <div>
+            <h1 className="font-extrabold text-lg md:text-xl tracking-tight">ISP RADIAL</h1>
+            <p className="text-[10px] text-emerald-400 font-bold uppercase tracking-wide">Client Portal / গ্রাহক সেলফ-সার্ভিস</p>
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-4">
+          <div className="hidden md:block text-right">
+            <p className="text-sm font-bold">{customer?.name}</p>
+            <p className="text-[10px] text-white/50 uppercase font-black">User ID: {customer?.username}</p>
+          </div>
+          <button 
+            onClick={onLogout}
+            className="flex items-center gap-2 bg-[#001717] hover:bg-red-950/80 hover:text-red-200 text-white/80 px-4 py-2 text-xs md:text-sm font-bold rounded-xl transition-all cursor-pointer border border-white/5"
+          >
+            <LogOut size={16} />
+            <span>লগ আউট</span>
+          </button>
+        </div>
+      </nav>
+
+      <div className="p-4 md:p-10 max-w-7xl mx-auto space-y-6">
+        {/* Welcome Banner */}
+        <div className="bg-gradient-to-r from-teal-900 via-[#002d2d] to-emerald-950 text-white rounded-3xl p-6 md:p-8 shadow-xl flex flex-col md:flex-row items-center justify-between gap-6">
+          <div className="text-left">
+            <h2 className="text-xl md:text-3xl font-extrabold tracking-tight">আসসালামু আলাইকুম, {customer?.name}! 🙋‍♂️</h2>
+            <p className="text-teal-200 mt-2 text-sm md:text-base">আইএসপি রেডিয়াল গ্রাহক পোর্টালে আপনাকে স্বাগতম। এখান থেকে আপনার বিল পরিশোধ করুন ও সংযোগের বিবরণ দেখুন।</p>
+          </div>
+          
+          <div className="flex items-center gap-3 bg-white/10 px-5 py-4 rounded-2xl border border-white/15">
+            <div className={cn(
+              "w-4 h-4 rounded-full animate-ping",
+              customer?.status === 'active' ? "bg-emerald-400" : "bg-red-400"
+            )} />
+            <div className="text-left">
+              <span className="text-[10px] font-bold text-teal-300 block">কানেকশন স্ট্যাটাস</span>
+              <span className="text-sm md:text-base font-black uppercase tracking-wider">{customer?.status === 'active' ? 'চালু আছে (Active)' : 'বন্ধ আছে (Expired)'}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Info Cards Row (Bento Style) */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {/* Card 1: My internet Package details */}
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 flex flex-col justify-between hover:shadow-md transition-shadow">
+            <div className="space-y-4 text-left">
+              <div className="flex items-center justify-between">
+                <div className="p-3 bg-indigo-50 text-indigo-600 rounded-2xl">
+                  <Wifi size={24} />
+                </div>
+                <span className="bg-indigo-50 text-indigo-700 text-xs font-black px-3 py-1 rounded-full uppercase">আমার প্যাকেজ</span>
+              </div>
+              <div>
+                <h3 className="text-2xl font-black text-slate-800 tracking-tight">{customer?.packageName}</h3>
+                <p className="text-indigo-600 font-extrabold text-sm mt-1">ইন্টারনেট গতি: {
+                  packages.find(p => p.id === customer?.packageId)?.speed || '10 Mbps'
+                }</p>
+              </div>
+            </div>
+            
+            <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between text-sm">
+              <span className="text-slate-400 font-bold">মাসিক বিল</span>
+              <span className="font-black text-lg text-indigo-700">৳{customer?.monthlyBill}/-</span>
+            </div>
+          </div>
+
+          {/* Card 2: Expiration timer */}
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 flex flex-col justify-between hover:shadow-md transition-shadow">
+            <div className="space-y-4 text-left">
+              <div className="flex items-center justify-between">
+                <div className="p-3 bg-rose-50 text-rose-600 rounded-2xl">
+                  <Clock size={24} />
+                </div>
+                <span className="bg-rose-50 text-rose-700 text-xs font-black px-3 py-1 rounded-full uppercase">বিল ও মেয়াদ</span>
+              </div>
+              
+              <div>
+                <h3 className="text-2xl font-black text-slate-800 tracking-tight">
+                  {isExpired ? 'মেয়াদ শেষ!' : `${daysRemaining} দিন অবশিষ্ট`}
+                </h3>
+                <p className="text-rose-600 font-bold text-xs mt-1">
+                  মেয়াদ পার হওয়ার তারিখ: {customer?.expiryDate ? new Date(customer.expiryDate).toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' }) : 'N/A'}
+                </p>
+              </div>
+            </div>
+            
+            <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between text-sm">
+              <span className="text-slate-400 font-bold">শেষ চার্জিং তারিখ</span>
+              <span className="font-bold text-slate-700">{
+                customer?.expiryDate ? new Date(new Date(customer.expiryDate).getTime() - 30 * 24 * 60 * 60 * 1000).toLocaleDateString('bn-BD') : 'N/A'
+              }</span>
+            </div>
+          </div>
+
+          {/* Card 3: Connection IP Information and Profile details */}
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 flex flex-col justify-between hover:shadow-md transition-shadow">
+            <div className="space-y-4 text-left">
+              <div className="flex items-center justify-between">
+                <div className="p-3 bg-emerald-50 text-emerald-600 rounded-2xl">
+                  <Globe size={24} />
+                </div>
+                <span className="bg-emerald-50 text-emerald-700 text-xs font-black px-3 py-1 rounded-full uppercase">সংযোগ বিবরণী</span>
+              </div>
+              
+              <div className="space-y-2 text-sm text-slate-600">
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-400 font-bold text-xs">আইপি এড্রেস (IP):</span>
+                  <span className="font-mono text-emerald-750 font-bold">{customer?.ipAddress || '192.168.10.22 (DHCP)'}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-400 font-bold text-xs">ম্যাক এড্রেস (MAC):</span>
+                  <span className="font-mono text-emerald-750 font-bold">{customer?.macAddress || 'A4:1F:D5:78:B2:91'}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-slate-400 font-bold text-xs">রিসেন্ট এরিয়া (Area):</span>
+                  <span className="font-bold text-slate-700">{customer?.area || 'বনানী কমার্শিয়ার এরিয়া'}</span>
+                </div>
+              </div>
+            </div>
+            
+            <div className="mt-4 pt-4 border-t border-slate-100 flex items-center justify-between text-sm">
+              <span className="text-slate-400 font-bold">মোবাইল নম্বর</span>
+              <span className="font-bold text-slate-700">{customer?.phone}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Speed Diagnostics & Recharge Requests (Interactive Panel) */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          
+          {/* Quick Recharge Request Form (Client Side Entry) */}
+          <div className="bg-white rounded-3xl p-6 md:p-8 shadow-sm border border-slate-100 text-left">
+            <h3 className="text-lg md:text-xl font-extrabold text-slate-800 tracking-tight flex items-center gap-2 mb-2">
+              <CreditCard size={20} className="text-[#002d2d]" />
+              <span>সহজ রিচার্জ রিকোয়েস্ট (Quick Bill Payment)</span>
+            </h3>
+            <p className="text-slate-400 text-xs md:text-sm mb-6">নীচে উল্লেখিত পেমেন্ট নম্বরে সেন্ড মানি বা ক্যাশ পেমেন্ট করে ফর্মটি পূরণ করুন:</p>
+
+            {rechargeSuccess && (
+              <div className="p-4 bg-emerald-50 border border-emerald-100 rounded-2xl text-emerald-800 font-bold text-xs md:text-sm mb-4 leading-relaxed">
+                {rechargeSuccess}
+              </div>
+            )}
+
+            {rechargeError && (
+              <div className="p-4 bg-red-50 border border-red-100 rounded-2xl text-red-700 font-bold text-xs md:text-sm mb-4">
+                {rechargeError}
+              </div>
+            )}
+
+            <form onSubmit={handleRequestRecharge} className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-black text-slate-400 uppercase tracking-wider mb-2">পেমেন্ট মেথড (Method)</label>
+                  <select
+                    value={rechargeMethod}
+                    onChange={(e) => setRechargeMethod(e.target.value)}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-indigo-500/10 font-bold text-slate-800 cursor-pointer"
+                  >
+                    <option value="bKash">bKash (বিকাশ) - ০১৭XXXXXXXX</option>
+                    <option value="Nagad">Nagad (নগদ) - ০১৯XXXXXXXX</option>
+                    <option value="Rocket">Rocket (রকেট) - ০১৮XXXXXXXX</option>
+                    <option value="Cash">Cash Handover (ক্যাশ)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-black text-slate-400 uppercase tracking-wider mb-2">রিচার্জের পরিমাণ (Amount)</label>
+                  <input
+                    type="number"
+                    required
+                    placeholder="e.g. 500"
+                    value={rechargeAmount}
+                    onChange={(e) => setRechargeAmount(e.target.value)}
+                    className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-indigo-500/10 font-bold text-slate-800"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-black text-slate-400 uppercase tracking-wider mb-2">গ্রাহক ট্রানজেকশন আইডি (bKash/Nagad TrxID)</label>
+                <input
+                  type="text"
+                  placeholder="e.g. 9KDLSD09K"
+                  value={rechargeTrxId}
+                  onChange={(e) => setRechargeTrxId(e.target.value)}
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-[#002d2d]/10 font-mono font-medium text-slate-800"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-black text-slate-400 uppercase tracking-wider mb-2">মন্তব্য বা বিবরণ (Comments/Notes)</label>
+                <textarea
+                  placeholder="কোনো অতিরিক্ত নির্দেশিকা থাকলে এখানে টাইপ করুন..."
+                  value={rechargeNote}
+                  rows={2}
+                  onChange={(e) => setRechargeNote(e.target.value)}
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-indigo-500/10 text-slate-800"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={rechargeLoading}
+                className="w-full bg-[#002d2d] hover:bg-[#003d3d] text-white py-4 rounded-xl font-bold text-sm select-none transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 mt-6 shadow-lg shadow-[#002d2d]/10"
+              >
+                {rechargeLoading ? (
+                  <div className="animate-spin rounded-full h-5 w-5 border-2 border-white border-t-transparent" />
+                ) : (
+                  <>
+                    <span>রিচার্জ অনুরোধ জমা দিন (Submit Request)</span>
+                    <Rocket size={16} />
+                  </>
+                )}
+              </button>
+            </form>
+          </div>
+
+          {/* Speed test meter mock */}
+          <div className="bg-white rounded-3xl p-6 md:p-8 shadow-sm border border-slate-100 flex flex-col justify-between text-left">
+            <div>
+              <h3 className="text-lg md:text-xl font-extrabold text-slate-800 tracking-tight flex items-center gap-2 mb-2">
+                <Zap size={20} className="text-amber-550 animate-pulse" />
+                <span>আইএসপি ব্যান্ডউইথ সেলফ-টেস্ট (Speed Diagnostics)</span>
+              </h3>
+              <p className="text-slate-400 text-xs md:text-sm mb-6">আপনার ইন্টারনেট গতির রিয়েল-টাইম পারফরম্যান্স ও ট্রাফিকের লাইভ ক্যালিব্রেশন মেজারমেন্ট টেস্ট করুন:</p>
+            </div>
+
+            <div className="flex flex-col items-center justify-center py-6 space-y-4">
+              <div className="relative w-40 h-40 rounded-full border-8 border-slate-100 flex items-center justify-center bg-gradient-to-tr from-slate-50 to-slate-100 shadow-inner">
+                <div className="text-center">
+                  <span className="text-4xl font-black text-slate-800 tracking-tight block">
+                    {speedVal > 0 ? speedVal : '0.0'}
+                  </span>
+                  <span className="text-[10px] uppercase font-black tracking-widest text-[#002d2d] block mt-1">Mbps</span>
+                </div>
+                
+                {/* Visual needle rotation for fun */}
+                <div 
+                  className="absolute w-1 h-14 bg-[#002d2d] rounded-full origin-bottom bottom-1/2 left-1/2 -ml-0.5 transition-transform duration-500" 
+                  style={{ transform: `rotate(${Math.min(180, (speedVal / 60) * 180 - 90)}deg)` }}
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={handleSpeedTest}
+                disabled={testingSpeed}
+                className="bg--200 bg-[#002d2d]/5 hover:bg-[#002d2d]/10 text-[#002d2d] font-black text-xs px-6 py-3 rounded-xl transition-all cursor-pointer select-none active:scale-95 uppercase tracking-wider"
+              >
+                {testingSpeed ? 'গতি পরিমাপ হচ্ছে...' : 'স্পিড টেস্ট শুরু করুন (Run Diagnostics)'}
+              </button>
+            </div>
+
+            <p className="text-[10px] text-center text-slate-400 mt-4">Note: This is a fast, ping diagnostics based utility connecting directly to ISP RADIAL local edge caching node.</p>
+          </div>
+        </div>
+
+        {/* Transactions list Table */}
+        <div className="bg-white rounded-3xl p-6 md:p-8 shadow-sm border border-slate-100 text-left">
+          <h3 className="text-lg md:text-xl font-extrabold text-slate-800 tracking-tight flex items-center gap-2 mb-6">
+            <TrendingUp size={20} className="text-teal-600" />
+            <span>আমার রিচার্জ / বিল পেমেন্ট ইতিহাস (Payment Invoices)</span>
+          </h3>
+
+          {transactions.length === 0 ? (
+            <div className="text-center py-12 border border-dashed border-slate-200 rounded-2xl">
+              <CreditCard size={48} className="text-slate-300 mx-auto mb-3" />
+              <p className="text-sm font-bold text-slate-400">আপনার কোনো লেনদেন রেকর্ড পাওয়া যায়নি!</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-slate-100">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-50 text-slate-400 font-extrabold text-xs uppercase border-b border-slate-100">
+                    <th className="px-6 py-4">রিচার্জের তারিখ</th>
+                    <th className="px-6 py-4">পেমেন্ট মেথড</th>
+                    <th className="px-6 py-4">ধরণ ও রেফারেন্স</th>
+                    <th className="px-6 py-4 text-center">পরিমাণ</th>
+                    <th className="px-6 py-4 text-center">স্ট্যাটাস</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50 text-sm">
+                  {transactions.map((trx) => (
+                    <tr key={trx.id} className="hover:bg-slate-50/50 transition-colors">
+                      <td className="px-6 py-4 font-bold text-slate-600">
+                        {trx.date ? new Date(trx.date.seconds ? trx.date.seconds * 1000 : trx.date).toLocaleDateString('bn-BD', { day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'N/A'}
+                      </td>
+                      <td className="px-6 py-4 font-black text-slate-800">
+                        {trx.method}
+                      </td>
+                      <td className="px-6 py-4 text-slate-500 max-w-xs truncate">
+                        <span className="font-semibold block text-slate-700 capitalize">{trx.type === 'monthly_bill' ? 'মাসিক বিল পেমেন্ট' : 'অফলাইন রিচার্জ'}</span>
+                        <span className="text-[10px] block font-mono">{trx.notes || 'N/A'}</span>
+                      </td>
+                      <td className="px-6 py-4 text-center font-black text-slate-800">
+                        ৳{trx.amount}/-
+                      </td>
+                      <td className="px-6 py-4 text-center">
+                        <span className={cn(
+                          "px-3 py-1 rounded-full text-xs font-black inline-block uppercase",
+                          trx.status === 'paid' && "bg-emerald-50 text-emerald-700",
+                          trx.status === 'pending' && "bg-amber-50 text-amber-700",
+                          trx.status === 'overdue' && "bg-rose-50 text-rose-700"
+                        )}>
+                          {trx.status === 'paid' ? 'সফল (Paid)' : trx.status === 'pending' ? 'পেন্ডিং (Pending)' : 'বকেয়া'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
     </div>
