@@ -69,3 +69,27 @@ export interface FirestoreErrorInfo {
     emailVerified?: boolean | null;
   };
 }
+
+export interface SMSConfig {
+  id?: string;
+  enabled: boolean;
+  provider: 'twilio' | 'greenweb' | 'bulksmsbd' | 'custom_api';
+  apiKey: string;
+  authToken: string;
+  senderId: string;
+  apiEndpoint: string;
+  smsTemplate: string;
+}
+
+export interface SMSLog {
+  id?: string;
+  customerId: string;
+  customerName: string;
+  phone: string;
+  content: string;
+  status: 'success' | 'failed' | 'pending';
+  gatewayResponse?: string;
+  date: any;
+  amount: number;
+}
+

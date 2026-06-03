@@ -73,6 +73,8 @@ import { motion, AnimatePresence } from 'motion/react';
 
 import { seedData } from './seed';
 import { FinanceView } from './FinanceView';
+import { sendSMSNotification } from './smsService';
+import { SMSConfigPanel } from './SMSConfigPanel';
 
 // Views
 type View = 'dashboard' | 'create-user' | 'edit-user' | 'all-customers' | 'manage-client' | 'customer-profile' | 'single-recharge' | 'edit-recharge' | 'manage-recharge' | 'packages' | 'create-package' | 'edit-package' | 'finance' | 'settings' | 'role-control' | 'add-admin' | 'manage-admins';
@@ -1377,6 +1379,18 @@ function SingleRechargeView({ customers, packages, onComplete }: { customers: Cu
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
 
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+
+  // Sync searchQuery when selectedCustomer updates
+  useEffect(() => {
+    if (selectedCustomer) {
+      setSearchQuery(`${selectedCustomer.username} (${selectedCustomer.name})`);
+    } else {
+      setSearchQuery('');
+    }
+  }, [selectedCustomer]);
+
   useEffect(() => {
     const cust = customers.find(c => c.id === formData.customerId);
     if (cust) {
@@ -1443,6 +1457,16 @@ function SingleRechargeView({ customers, packages, onComplete }: { customers: Cu
         status: 'active',
         updatedAt: Timestamp.now()
       });
+
+      // Send automatic payment receipt SMS notification
+      try {
+        const finalAmt = Number(formData.amount) - Number(formData.discount);
+        const smsResult = await sendSMSNotification(selectedCustomer.username, finalAmt, formData.method);
+        console.log("Automatic receipts SMS send result: ", smsResult);
+      } catch (smsErr) {
+        console.error("Failed to dispatch automated SMS receipt:", smsErr);
+      }
+
       onComplete();
     } catch (err) {
       console.error(err);
@@ -1451,11 +1475,17 @@ function SingleRechargeView({ customers, packages, onComplete }: { customers: Cu
     }
   };
 
+  const filteredCustomers = customers.filter(c => 
+    (c.username || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
+    (c.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    (c.phone || '').toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
   return (
     <motion.div 
       initial={{ opacity: 0, scale: 0.98 }}
       animate={{ opacity: 1, scale: 1 }}
-      className="max-w-4xl mx-auto space-y-6"
+      className="max-w-4xl mx-auto space-y-6 text-left"
     >
       <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
         <h1 className="text-2xl font-bold text-gray-900 mb-2">Collection (Home User)</h1>
@@ -1477,25 +1507,77 @@ function SingleRechargeView({ customers, packages, onComplete }: { customers: Cu
 
         <form onSubmit={handleSubmit} className="space-y-8">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
-            <div className="space-y-1">
+            <div className="space-y-1 relative">
               <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider flex justify-between">
-                User ID *
+                User ID / Username *
                 {touched.customerId && errors.customerId && <span className="text-red-500 normal-case font-medium">{errors.customerId}</span>}
               </label>
-              <select 
-                value={formData.customerId}
-                onChange={e => handleChange('customerId', e.target.value)}
-                onBlur={() => handleBlur('customerId')}
-                className={cn(
-                  "w-full p-3.5 bg-gray-50 rounded-xl border transition-all text-sm outline-none cursor-pointer appearance-none",
-                  touched.customerId && errors.customerId ? "border-red-300 focus:ring-red-500/10" : "border-gray-100 focus:ring-blue-500/10"
-                )}
-              >
-                <option value="">Select User</option>
-                {customers.map(c => (
-                  <option key={c.id} value={c.id}>{c.username} — {c.name}</option>
-                ))}
-              </select>
+              <div className="relative">
+                <input 
+                  type="text"
+                  placeholder="Type User ID, Name or Phone to search..."
+                  value={searchQuery}
+                  onFocus={() => setIsDropdownOpen(true)}
+                  onChange={e => {
+                    const val = e.target.value;
+                    setSearchQuery(val);
+                    setIsDropdownOpen(true);
+                    if (formData.customerId) {
+                      setFormData(prev => ({ ...prev, customerId: '' }));
+                    }
+                  }}
+                  onBlur={() => {
+                    setTimeout(() => {
+                      setIsDropdownOpen(false);
+                      if (!formData.customerId) {
+                        setSearchQuery('');
+                      } else {
+                        const activeCust = customers.find(c => c.id === formData.customerId);
+                        if (activeCust) {
+                          setSearchQuery(`${activeCust.username} (${activeCust.name})`);
+                        }
+                      }
+                    }, 250);
+                    handleBlur('customerId');
+                  }}
+                  className={cn(
+                    "w-full p-3.5 bg-gray-50 rounded-xl border transition-all text-sm outline-none pr-10",
+                    touched.customerId && errors.customerId ? "border-red-300 focus:ring-red-500/10" : "border-gray-100 focus:ring-blue-500/10"
+                  )}
+                />
+                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-450 pointer-events-none">
+                  <Search size={16} />
+                </span>
+              </div>
+
+              {isDropdownOpen && (
+                <div className="absolute z-50 left-0 right-0 mt-1 max-h-60 overflow-y-auto bg-white border border-gray-200 rounded-xl shadow-xl divide-y divide-gray-50">
+                  {filteredCustomers.length === 0 ? (
+                    <div className="p-3 text-xs text-gray-400 text-center">No customers found</div>
+                  ) : (
+                    filteredCustomers.map(c => (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onMouseDown={() => {
+                          handleChange('customerId', c.id);
+                          setSearchQuery(`${c.username} (${c.name})`);
+                          setIsDropdownOpen(false);
+                        }}
+                        className="w-full text-left px-4 py-3 text-xs md:text-sm hover:bg-[#002d2d]/5 transition-all flex items-center justify-between cursor-pointer"
+                      >
+                        <div>
+                          <span className="font-extrabold text-[#002d2d] block">{c.username}</span>
+                          <span className="text-xs text-gray-550 block">{c.name}</span>
+                        </div>
+                        <span className="text-[10px] bg-slate-100 text-[#002d2d] px-2.5 py-1 rounded-full font-bold">
+                          {c.phone}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="space-y-1">
@@ -1839,6 +1921,18 @@ function EditRechargeView({ transaction, customers, onComplete }: { transaction:
         remarks: formData.remarks,
         updatedAt: Timestamp.now()
       });
+
+      // Send automatic payment receipt SMS notification when marked as paid
+      if (formData.status === 'paid') {
+        try {
+          const finalAmt = Number(formData.amount) - Number(formData.discount);
+          const smsResult = await sendSMSNotification(transaction.customerId, finalAmt, formData.method);
+          console.log("Automatic receipt SMS send result (Edit): ", smsResult);
+        } catch (smsErr) {
+          console.error("Failed to dispatch automated SMS receipt on update:", smsErr);
+        }
+      }
+
       onComplete();
     } catch (err) {
       console.error(err);
@@ -3020,14 +3114,36 @@ function CustomersView({ customers, packages, onCreateUser, onEditUser, onViewPr
 
 function BillingView({ transactions, customers, onEdit }: { transactions: Transaction[]; customers: Customer[]; onEdit: (tx: Transaction) => void }) {
   const [searchTerm, setSearchTerm] = useState('');
-  const [fromDate, setFromDate] = useState('2026-05-01');
-  const [toDate, setToDate] = useState('2026-05-31');
+  const [fromDate, setFromDate] = useState(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() - 1);
+    return d.toISOString().split('T')[0];
+  });
+  const [toDate, setToDate] = useState(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() + 1);
+    return d.toISOString().split('T')[0];
+  });
   const [methodFilter, setMethodFilter] = useState('ALL Method');
   const [statusFilter, setStatusFilter] = useState('ALL Status');
   const [areaFilter, setAreaFilter] = useState('ALL Group');
   const [collectorFilter, setCollectorFilter] = useState('ALL Staff');
   const [selectedInvoiceTx, setSelectedInvoiceTx] = useState<Transaction | null>(null);
   const [selectedInvoiceNumber, setSelectedInvoiceNumber] = useState<number>(0);
+
+  const handleClearAllTransactions = async () => {
+    if (window.confirm("আপনি কি নিশ্চিতভাবে সকল ট্রানজেকশন/লেনদেন মুছে ফেলতে চান? (Are you sure you want to delete ALL transactions permanentally?)")) {
+      try {
+        const querySnapshot = await getDocs(collection(db, 'transactions'));
+        for (const docSnap of querySnapshot.docs) {
+          await deleteDoc(doc(db, 'transactions', docSnap.id));
+        }
+        alert("সকল ট্রানজেকশন সফলভাবে মুছে ফেলা হয়েছে! (All transactions have been successfully cleared!)");
+      } catch (err) {
+        console.error("Failed to clear transactions:", err);
+      }
+    }
+  };
 
   const [deleteDialog, setDeleteDialog] = useState<{ isOpen: boolean; id: string | null }>({ isOpen: false, id: null });
 
@@ -3177,6 +3293,12 @@ function BillingView({ transactions, customers, onEdit }: { transactions: Transa
             <button className="px-4 py-1.5 bg-[#e91e63] text-white rounded-lg text-sm font-bold shadow-sm">Excel</button>
             <button className="px-4 py-1.5 bg-[#8e24aa] text-white rounded-lg text-sm font-bold shadow-sm">PDF</button>
             <button className="px-4 py-1.5 bg-[#d81b60] text-white rounded-lg text-sm font-bold shadow-sm">Print</button>
+            <button 
+              onClick={handleClearAllTransactions} 
+              className="px-4 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-bold shadow-sm flex items-center gap-1.5 transition-colors"
+            >
+              <Trash2 size={14} /> Clear All
+            </button>
           </div>
         </div>
         
@@ -3670,7 +3792,7 @@ function PackagesView({ packages, onAdd, onEdit }: { packages: Package[]; onAdd:
 }
 
 function SettingsView({ user, hasPermission }: { user: any; hasPermission: (module: string, action: 'read' | 'create' | 'edit' | 'delete') => boolean }) {
-  const [activeTab, setActiveTab] = useState<'system' | 'permissions' | 'admins'>('system');
+  const [activeTab, setActiveTab] = useState<'system' | 'permissions' | 'admins' | 'sms'>('system');
   const [showAddAdmin, setShowAddAdmin] = useState(false);
 
   const canAccessHR = hasPermission('HR Admin', 'read');
@@ -3691,6 +3813,15 @@ function SettingsView({ user, hasPermission }: { user: any; hasPermission: (modu
           )}
         >
           General Settings
+        </button>
+        <button
+          onClick={() => setActiveTab('sms')}
+          className={cn(
+            "flex-1 py-3 text-sm font-bold rounded-xl transition-all",
+            activeTab === 'sms' ? "bg-[#002d2d] text-white" : "text-gray-500 hover:text-[#002d2d] hover:bg-gray-50"
+          )}
+        >
+          SMS Gateway & Receipts
         </button>
         {canAccessHR && (
           <>
@@ -3808,6 +3939,10 @@ function SettingsView({ user, hasPermission }: { user: any; hasPermission: (modu
 
       {activeTab === 'permissions' && canAccessHR && (
         <RoleControlView />
+      )}
+
+      {activeTab === 'sms' && (
+        <SMSConfigPanel />
       )}
 
       {activeTab === 'admins' && canAccessHR && (

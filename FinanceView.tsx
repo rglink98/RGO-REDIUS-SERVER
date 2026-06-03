@@ -22,6 +22,7 @@ import {
   Clock,
   Trash2,
   CalendarDays,
+  Pencil,
   X
 } from 'lucide-react';
 import { 
@@ -36,7 +37,7 @@ import {
   Line
 } from 'recharts';
 import { motion } from 'motion/react';
-import { collection, addDoc, Timestamp, doc, deleteDoc } from 'firebase/firestore';
+import { collection, addDoc, Timestamp, doc, deleteDoc, updateDoc } from 'firebase/firestore';
 import { db } from './firebase';
 import { Transaction, FinanceRecord } from './types';
 import { cn } from './utils';
@@ -247,10 +248,75 @@ export function FinanceView({
     }
   };
 
-  const handleDeleteRecord = async (id: string) => {
-    if (window.confirm('Are you sure you want to delete this record?')) {
+  const [editingRecord, setEditingRecord] = useState<any | null>(null);
+  const [editFormData, setEditFormData] = useState({
+    amount: '',
+    category: '',
+    description: '',
+    date: '',
+    customerName: '',
+    method: '',
+    type: ''
+  });
+
+  const handleStartEditRecord = (record: any) => {
+    const rDate = record.date?.toDate ? record.date.toDate() : new Date(record.date);
+    const dateStr = isNaN(rDate.getTime()) ? new Date().toISOString().split('T')[0] : rDate.toISOString().split('T')[0];
+
+    setEditingRecord(record);
+    setEditFormData({
+      amount: String(record.amount || ''),
+      category: record.category || '',
+      description: record.source === 'transaction' ? `Payment from ${record.customerName || 'Customer'}` : (record.description || ''),
+      date: dateStr,
+      customerName: record.customerName || '',
+      method: record.method || 'Cash',
+      type: record.type || (record.status === 'paid' ? 'recharge' : 'monthly_bill')
+    });
+  };
+
+  const handleUpdateRecord = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingRecord) return;
+    setLoading(true);
+    try {
+      const collectionName = editingRecord.source === 'transaction' ? 'transactions' : 'finance';
+      const docRef = doc(db, collectionName, editingRecord.id);
+
+      const javaScriptDate = new Date(editFormData.date);
+      // Ensure local dynamic timezone is set to mid-day or matching initial
+      const finalTimestamp = Timestamp.fromDate(javaScriptDate);
+
+      const updatedFields: any = {
+        amount: Number(editFormData.amount),
+        date: finalTimestamp
+      };
+
+      if (editingRecord.source === 'transaction') {
+        updatedFields.customerName = editFormData.customerName;
+        updatedFields.method = editFormData.method;
+        if (editFormData.type) {
+          updatedFields.type = editFormData.type;
+        }
+      } else {
+        updatedFields.category = editFormData.category;
+        updatedFields.description = editFormData.description;
+      }
+
+      await updateDoc(docRef, updatedFields);
+      setEditingRecord(null);
+    } catch (err) {
+      console.error("Failed to update record:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteRecord = async (id: string, source: 'finance' | 'transaction' = 'finance') => {
+    if (window.confirm('নিশ্চিতভাবে এই রেকর্ডটি মুছে ফেলতে চান? (Are you sure you want to delete this record?)')) {
       try {
-        await deleteDoc(doc(db, 'finance', id));
+        const collectionName = source === 'transaction' ? 'transactions' : 'finance';
+        await deleteDoc(doc(db, collectionName, id));
       } catch (err) {
         console.error(err);
       }
@@ -531,15 +597,27 @@ export function FinanceView({
                           {isIncome ? '+' : '-'} ৳{record.amount?.toLocaleString()}
                         </p>
                       </td>
-                      <td className="px-6 py-5">
-                         {record.source === 'finance' && hasPermission('Finance', 'delete') && (
-                           <button 
-                            onClick={() => handleDeleteRecord(record.id)}
-                            className="p-2 text-gray-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
-                           >
-                              <Trash2 size={16} />
-                           </button>
-                         )}
+                      <td className="px-6 py-5 col-action">
+                        <div className="flex items-center gap-1.5 justify-end">
+                           {hasPermission('Finance', 'edit') && (
+                             <button 
+                              onClick={() => handleStartEditRecord(record)}
+                              className="p-2 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                              title="সম্পাদনা করুন (Edit)"
+                             >
+                                <Pencil size={15} />
+                             </button>
+                           )}
+                           {hasPermission('Finance', 'delete') && (
+                             <button 
+                              onClick={() => handleDeleteRecord(record.id, record.source)}
+                              className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                              title="মুছে ফেলুন (Delete)"
+                             >
+                                <Trash2 size={15} />
+                             </button>
+                           )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1034,6 +1112,133 @@ export function FinanceView({
               <div className="flex gap-3 pt-4">
                 <button type="button" onClick={() => setShowAddIncome(false)} className="flex-1 py-3.5 bg-gray-100 text-gray-600 rounded-xl font-bold">Cancel</button>
                 <button type="submit" disabled={loading} className="flex-1 py-3.5 bg-emerald-500 text-white rounded-xl font-bold shadow-lg shadow-emerald-100">Record</button>
+              </div>
+            </form>
+          </motion.div>
+        </div>
+      )}
+
+      {editingRecord && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <motion.div initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} className="bg-white rounded-3xl shadow-2xl w-full max-w-md overflow-hidden text-left">
+            <div className="p-6 bg-[#002d2d] text-white flex justify-between items-center">
+              <h3 className="font-bold text-lg">
+                Edit {editingRecord.source === 'transaction' ? 'Payment Transaction' : 'Finance Record'}
+              </h3>
+              <button onClick={() => setEditingRecord(null)} className="p-1 hover:bg-white/20 rounded-lg">
+                <X size={20} />
+              </button>
+            </div>
+            
+            <form onSubmit={handleUpdateRecord} className="p-6 space-y-4 text-left">
+              {editingRecord.source === 'transaction' ? (
+                <>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-gray-500 uppercase">Customer Name</label>
+                    <input 
+                      type="text" 
+                      required 
+                      value={editFormData.customerName} 
+                      onChange={e => setEditFormData({...editFormData, customerName: e.target.value})} 
+                      className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none text-sm font-semibold" 
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-gray-500 uppercase">Payment Method</label>
+                    <select 
+                      required 
+                      value={editFormData.method} 
+                      onChange={e => setEditFormData({...editFormData, method: e.target.value})} 
+                      className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none text-sm"
+                    >
+                      <option value="Cash">Cash</option>
+                      <option value="bKash">bKash</option>
+                      <option value="Nagad">Nagad</option>
+                      <option value="Rocket">Rocket</option>
+                      <option value="Bank">Bank Transfer</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-gray-500 uppercase">Transaction Type</label>
+                    <select 
+                      required 
+                      value={editFormData.type} 
+                      onChange={e => setEditFormData({...editFormData, type: e.target.value})} 
+                      className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none text-sm"
+                    >
+                      <option value="recharge">Recharge</option>
+                      <option value="monthly_bill">Monthly Bill</option>
+                    </select>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-gray-500 uppercase">Category</label>
+                    <select 
+                      required 
+                      value={editFormData.category} 
+                      onChange={e => setEditFormData({...editFormData, category: e.target.value})} 
+                      className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none text-sm"
+                    >
+                      <option value="">Select Category</option>
+                      {editingRecord.type === 'expense' 
+                        ? expenseCategories.map(c => <option key={c} value={c}>{c}</option>)
+                        : incomeCategories.map(c => <option key={c} value={c}>{c}</option>)
+                      }
+                      <option value="Others">Others</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-bold text-gray-500 uppercase">Description</label>
+                    <input 
+                      type="text" 
+                      required 
+                      value={editFormData.description} 
+                      onChange={e => setEditFormData({...editFormData, description: e.target.value})} 
+                      className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none text-sm font-semibold text-gray-805" 
+                    />
+                  </div>
+                </>
+              )}
+              
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-gray-500 uppercase">Amount (৳)</label>
+                <input 
+                  type="number" 
+                  required 
+                  value={editFormData.amount} 
+                  onChange={e => setEditFormData({...editFormData, amount: e.target.value})} 
+                  className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none font-bold text-sm" 
+                />
+              </div>
+              
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-gray-500 uppercase">Date</label>
+                <input 
+                  type="date" 
+                  required 
+                  value={editFormData.date} 
+                  onChange={e => setEditFormData({...editFormData, date: e.target.value})} 
+                  className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none text-sm" 
+                />
+              </div>
+
+              <div className="pt-4 border-t border-gray-100 flex gap-3 justify-end">
+                <button 
+                  type="button" 
+                  onClick={() => setEditingRecord(null)} 
+                  className="px-5 py-2.5 bg-gray-100 text-gray-550 rounded-xl font-semibold hover:bg-gray-200 transition-colors text-xs cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit" 
+                  disabled={loading}
+                  className="px-5 py-2.5 bg-[#002d2d] hover:bg-[#003d3d] text-white rounded-xl font-bold shadow-md transition-all active:scale-95 text-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  {loading ? 'Saving...' : 'Save Changes'}
+                </button>
               </div>
             </form>
           </motion.div>
