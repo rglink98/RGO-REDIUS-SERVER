@@ -23,6 +23,7 @@ export interface Customer {
   ipAddress?: string;
   registrationDate?: string;
   alternateNumber?: string;
+  notes?: string;
 }
 
 export interface Package {
@@ -91,5 +92,13 @@ export interface SMSLog {
   gatewayResponse?: string;
   date: any;
   amount: number;
+}
+
+export interface LogoConfig {
+  id?: string;
+  useCustomLogo: boolean;
+  logoUrl: string; // base64 DataURL
+  companyName: string; // Dynamic customizable ISP brand name
+  updatedAt?: any;
 }
 

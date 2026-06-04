@@ -1,6 +1,7 @@
 import { collection, addDoc, getDocs, doc, getDoc, query, where, Timestamp } from 'firebase/firestore';
 import { db } from './firebase';
-import { SMSConfig, Customer, SMSLog } from './types';
+import { SMSConfig, Customer, SMSLog, OperationType } from './types';
+import { handleFirestoreError } from './utils';
 
 // Default configuration for SMS service
 export const DEFAULT_SMS_CONFIG: SMSConfig = {
@@ -25,7 +26,7 @@ export async function getSMSConfig(): Promise<SMSConfig> {
       return { ...DEFAULT_SMS_CONFIG, ...docSnap.data() } as SMSConfig;
     }
   } catch (error) {
-    console.error("Failed to load SMS config:", error);
+    handleFirestoreError(error, 'get', 'settings/sms_config');
   }
   return DEFAULT_SMS_CONFIG;
 }

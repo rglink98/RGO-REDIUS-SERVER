@@ -63,6 +63,38 @@
         "description": { "type": "string" }
       },
       "required": ["type", "amount", "date"]
+    },
+    "SMSConfig": {
+      "title": "SMSConfig",
+      "description": "SMS Gateway Configurations",
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "provider": { "type": "string", "enum": ["twilio", "greenweb", "bulksmsbd", "custom_api"] },
+        "apiKey": { "type": "string" },
+        "authToken": { "type": "string" },
+        "senderId": { "type": "string" },
+        "apiEndpoint": { "type": "string" },
+        "smsTemplate": { "type": "string" }
+      },
+      "required": ["enabled", "provider", "smsTemplate"]
+    },
+    "SMSLog": {
+      "title": "SMSLog",
+      "description": "Logged SMS notification status",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "customerId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "phone": { "type": "string" },
+        "content": { "type": "string" },
+        "status": { "type": "string", "enum": ["success", "failed", "pending"] },
+        "gatewayResponse": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "amount": { "type": "number" }
+      },
+      "required": ["customerId", "customerName", "phone", "content", "status", "date", "amount"]
     }
   },
   "firestore": {
@@ -81,6 +113,14 @@
     "finance": {
       "schema": "Finance",
       "description": "History of general business finances"
+    },
+    "settings": {
+      "schema": "SMSConfig",
+      "description": "Global config storage objects"
+    },
+    "sms_logs": {
+      "schema": "SMSLog",
+      "description": "History of automatic notification receipts sent"
     }
   }
 }

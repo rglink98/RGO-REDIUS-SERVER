@@ -96,5 +96,15 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isAdmin() || true;
     }
+
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin() || true;
+    }
+
+    match /sms_logs/{smsLogId} {
+      allow read: if true;
+      allow write: if isAdmin() || true;
+    }
   }
 }

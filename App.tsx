@@ -46,7 +46,9 @@ import {
   Filter,
   Upload,
   X,
-  Star
+  Star,
+  Copy,
+  ExternalLink
 } from 'lucide-react';
 import Papa from 'papaparse';
 import { 
@@ -75,6 +77,10 @@ import { seedData } from './seed';
 import { FinanceView } from './FinanceView';
 import { sendSMSNotification } from './smsService';
 import { SMSConfigPanel } from './SMSConfigPanel';
+import { LogoConfigPanel } from './LogoConfigPanel';
+import { getLogoConfig, DEFAULT_LOGO_CONFIG } from './logoService';
+import { LogoConfig } from './types';
+
 
 // Views
 type View = 'dashboard' | 'create-user' | 'edit-user' | 'all-customers' | 'manage-client' | 'customer-profile' | 'single-recharge' | 'edit-recharge' | 'manage-recharge' | 'packages' | 'create-package' | 'edit-package' | 'finance' | 'settings' | 'role-control' | 'add-admin' | 'manage-admins';
@@ -140,7 +146,13 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   
   // Custom Login States
-  const [loginTab, setLoginTab] = useState<'admin' | 'customer'>('admin');
+  const isCustomerPortalOnly = window.location.search.includes('portal=customer') || 
+                               window.location.search.includes('type=customer') || 
+                               window.location.search.includes('view=customer');
+
+  const [loginTab, setLoginTab] = useState<'admin' | 'customer'>(() => {
+    return isCustomerPortalOnly ? 'customer' : 'admin';
+  });
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -152,10 +164,30 @@ export default function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [financeRecords, setFinanceRecords] = useState<FinanceRecord[]>([]);
   const [roles, setRoles] = useState<any[]>([]);
+  const [branding, setBranding] = useState<LogoConfig>(DEFAULT_LOGO_CONFIG);
+
+  const loadBranding = async () => {
+    try {
+      const conf = await getLogoConfig();
+      setBranding(conf);
+    } catch (err) {
+      console.error("Failed to load branding settings", err);
+    }
+  };
 
   const toggleMenu = (menu: string) => {
     setExpandedMenus(prev => ({ ...prev, [menu]: !prev[menu] }));
   };
+
+  useEffect(() => {
+    loadBranding();
+    const handleBrandingUpdate = () => {
+      loadBranding();
+    };
+    window.addEventListener('branding-updated', handleBrandingUpdate);
+    return () => window.removeEventListener('branding-updated', handleBrandingUpdate);
+  }, []);
+
 
   useEffect(() => {
     const savedSession = localStorage.getItem('isp_session');
@@ -441,48 +473,62 @@ export default function App() {
           className="bg-white rounded-[2rem] shadow-2xl max-w-lg w-full p-8 md:p-10 border border-gray-100 flex flex-col justify-between"
         >
           <div>
-            <div className="w-20 h-20 bg-gradient-to-tr from-[#002d2d] to-emerald-800 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-emerald-950/20">
-              <Activity className="text-emerald-400 w-10 h-10 animate-pulse" />
-            </div>
+            {branding.useCustomLogo && branding.logoUrl ? (
+              <div className="w-24 h-24 bg-white border border-gray-150 rounded-2xl flex items-center justify-center mx-auto mb-6 p-2 shadow-md">
+                <img src={branding.logoUrl} alt="Company Logo" className="max-w-full max-h-full object-contain" referrerPolicy="no-referrer" />
+              </div>
+            ) : (
+              <div className="w-20 h-20 bg-gradient-to-tr from-[#002d2d] to-emerald-800 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-emerald-950/20">
+                <Activity className="text-emerald-400 w-10 h-10 animate-pulse" />
+              </div>
+            )}
             
-            <h1 className="text-3xl font-black text-gray-900 text-center mb-1 tracking-tight uppercase">ISP RADIAL</h1>
+            <h1 className="text-3xl font-black text-gray-900 text-center mb-1 tracking-tight uppercase truncate px-2">{branding.companyName || 'RGO ISP RESIUS'}</h1>
             <p className="text-gray-500 text-center text-sm mb-8">নিরাপদ ড্যাশবোর্ড ও সংযোগ নিয়ন্ত্রণ পোর্টাল</p>
             
             {/* Login Tab Selection */}
-            <div className="bg-gray-100 p-1.5 rounded-2xl flex items-center justify-between mb-6 border border-gray-100">
-              <button
-                type="button"
-                onClick={() => {
-                  setLoginTab('admin');
-                  setLoginError('');
-                }}
-                className={cn(
-                  "flex-1 py-3 text-xs md:text-sm font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2",
-                  loginTab === 'admin' 
-                    ? "bg-[#002d2d] text-white shadow-md shadow-[#002d2d]/20 scale-[1.02]" 
-                    : "text-gray-500 hover:text-gray-900 hover:bg-gray-200"
-                )}
-              >
-                <ShieldCheck size={16} />
-                <span>স্টাফ/এডমিন লগইন</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setLoginTab('customer');
-                  setLoginError('');
-                }}
-                className={cn(
-                  "flex-1 py-3 text-xs md:text-sm font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2",
-                  loginTab === 'customer' 
-                    ? "bg-[#002d2d] text-white shadow-md shadow-[#002d2d]/20 scale-[1.02]" 
-                    : "text-gray-500 hover:text-gray-900 hover:bg-gray-200"
-                )}
-              >
-                <User size={16} />
-                <span>গ্রাহক/ইউজার লগইন</span>
-              </button>
-            </div>
+            {!isCustomerPortalOnly && (
+              <div className="bg-gray-100 p-1.5 rounded-2xl flex items-center justify-between mb-6 border border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginTab('admin');
+                    setLoginError('');
+                  }}
+                  className={cn(
+                    "flex-1 py-3 text-xs md:text-sm font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2",
+                    loginTab === 'admin' 
+                      ? "bg-[#002d2d] text-white shadow-md shadow-[#002d2d]/20 scale-[1.02]" 
+                      : "text-gray-500 hover:text-gray-900 hover:bg-gray-200"
+                  )}
+                >
+                  <ShieldCheck size={16} />
+                  <span>স্টাফ/এডমিন লগইন</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginTab('customer');
+                    setLoginError('');
+                  }}
+                  className={cn(
+                    "flex-1 py-3 text-xs md:text-sm font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2",
+                    loginTab === 'customer' 
+                      ? "bg-[#002d2d] text-white shadow-md shadow-[#002d2d]/20 scale-[1.02]" 
+                      : "text-gray-500 hover:text-gray-900 hover:bg-gray-200"
+                  )}
+                >
+                  <User size={16} />
+                  <span>গ্রাহক/ইউজার লগইন</span>
+                </button>
+              </div>
+            )}
+            
+            {isCustomerPortalOnly && (
+              <div className="mb-6 p-4 bg-emerald-50 text-emerald-800 border border-emerald-100 rounded-2xl text-center text-xs font-bold leading-relaxed">
+                🔐 কাস্টমার সেলফ-সার্ভিস পোর্টাল: অনুগ্রহ করে আপনার ইউজার আইডি এবং পাসওয়ার্ড দিয়ে লগইন করুন।
+              </div>
+            )}
             
             {loginError && (
               <motion.div 
@@ -611,10 +657,16 @@ export default function App() {
         !isSidebarOpen && "-translate-x-full"
       )}>
         <div className="p-8 flex items-center gap-4">
-          <div className="p-2.5 bg-emerald-400/20 rounded-xl border border-emerald-400/30">
-            <Activity className="w-7 h-7 text-emerald-400" />
-          </div>
-          <h1 className="font-extrabold text-2xl tracking-tighter">ISP RADIAL</h1>
+          {branding.useCustomLogo && branding.logoUrl ? (
+            <div className="w-11 h-11 bg-white border border-[#002d2d]/20 rounded-xl flex items-center justify-center p-1 shrink-0 overflow-hidden">
+              <img src={branding.logoUrl} alt="Logo" className="max-w-full max-h-full object-contain" referrerPolicy="no-referrer" />
+            </div>
+          ) : (
+            <div className="p-2.5 bg-emerald-400/20 rounded-xl border border-emerald-400/30 shrink-0">
+              <Activity className="w-7 h-7 text-emerald-400" />
+            </div>
+          )}
+          <h1 className="font-extrabold text-2xl tracking-tighter truncate">{branding.companyName || 'ISP RADIAL'}</h1>
         </div>
 
         <nav className="flex-1 overflow-y-auto px-6 py-6 space-y-1.5 custom-scrollbar">
@@ -832,7 +884,7 @@ export default function App() {
             {view === 'add-admin' && <AdminFormView key="add-admin" onComplete={() => setView('manage-admins')} />}
             {view === 'manage-admins' && <AdminListView key="manage-admins" onAdd={() => setView('add-admin')} />}
             {view === 'finance' && <FinanceView key="finance" transactions={transactions} financeRecords={financeRecords} hasPermission={hasPermission} />}
-            {view === 'settings' && <SettingsView key="settings" user={user} hasPermission={hasPermission} />}
+            {view === 'settings' && <SettingsView key="settings" user={user} hasPermission={hasPermission} branding={branding} />}
             
             {!['dashboard', 'all-customers', 'manage-client', 'customer-profile', 'create-user', 'edit-user', 'single-recharge', 'edit-recharge', 'manage-recharge', 'packages', 'create-package', 'edit-package', 'settings', 'role-control', 'add-admin', 'manage-admins', 'finance'].includes(view) && (
               <div className="h-[60vh] flex flex-col items-center justify-center text-gray-400 bg-white rounded-3xl border border-dashed border-gray-200">
@@ -1058,7 +1110,8 @@ function UserFormView({ packages, initialData, onComplete }: { packages: Package
     alternateNumber: initialData?.alternateNumber || '',
     registrationDate: initialData?.registrationDate || '',
     packageId: initialData?.packageId || '',
-    status: (initialData?.status as any) || 'active'
+    status: (initialData?.status as any) || 'active',
+    notes: initialData?.notes || ''
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
@@ -1351,6 +1404,17 @@ function UserFormView({ packages, initialData, onComplete }: { packages: Package
             <option value="active">Active</option>
             <option value="disabled">Disabled</option>
           </select>
+        </div>
+        
+        <div className="space-y-1 md:col-span-2">
+          <label className="text-xs font-bold text-gray-500 uppercase">Internal Notes</label>
+          <textarea 
+            rows={3} 
+            value={formData.notes}
+            onChange={e => handleChange('notes', e.target.value)}
+            className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 focus:ring-2 focus:ring-[#002d2d]/20 transition-all text-sm resize-none"
+            placeholder="Add internal notes about payment habits, billing cycles, or support history..."
+          />
         </div>
         
         <div className="md:col-span-2 flex justify-end gap-3 mt-4">
@@ -2120,6 +2184,19 @@ function CustomerProfileView({ customer, transactions, packages, onBack }: { cus
             <DetailRow icon={<Globe size={18} />} label="IP Address" value={customer.ipAddress || '10.10.15.195'} />
             <DetailRow icon={<Calendar size={18} />} label="Expiration Date" value={customer.expiryDate ? new Date(customer.expiryDate).toLocaleDateString('en-CA') : '2026-05-15'} />
             <DetailRow icon={<DollarSign size={18} />} label="Monthly Rent" value={(customer.monthlyBill || packages.find(p => p.id === customer.packageId || p.name.toLowerCase().replace(/[\s._-]+/g, '') === (customer.packageName || '').toLowerCase().replace(/[\s._-]+/g, ''))?.price || 0).toFixed(2)} />
+          </div>
+        </div>
+
+        {/* Internal Admin Notes */}
+        <div className="bg-white rounded-[2.5rem] p-10 shadow-xl shadow-black/5 border border-gray-100">
+          <h3 className="text-xl font-black text-gray-900 mb-6 flex items-center gap-4">
+            <span className="w-2 h-6 bg-amber-500 rounded-full"></span>
+            Internal Admin Notes
+          </h3>
+          <div className="bg-amber-50/40 border border-amber-150 rounded-2xl p-6 text-gray-700 font-medium text-sm leading-relaxed whitespace-pre-wrap">
+            {customer.notes ? customer.notes : (
+              <span className="text-gray-400 italic">No custom notes specified for this client. You can edit their profile to append permanent instructions or billing logs.</span>
+            )}
           </div>
         </div>
 
@@ -3791,11 +3868,20 @@ function PackagesView({ packages, onAdd, onEdit }: { packages: Package[]; onAdd:
   );
 }
 
-function SettingsView({ user, hasPermission }: { user: any; hasPermission: (module: string, action: 'read' | 'create' | 'edit' | 'delete') => boolean }) {
-  const [activeTab, setActiveTab] = useState<'system' | 'permissions' | 'admins' | 'sms'>('system');
+function SettingsView({ user, hasPermission, branding }: { user: any; hasPermission: (module: string, action: 'read' | 'create' | 'edit' | 'delete') => boolean; branding: LogoConfig }) {
+  const [activeTab, setActiveTab] = useState<'system' | 'permissions' | 'admins' | 'sms' | 'logo'>('system');
   const [showAddAdmin, setShowAddAdmin] = useState(false);
 
   const canAccessHR = hasPermission('HR Admin', 'read');
+
+  const [copied, setCopied] = useState(false);
+  const portalUrl = `${window.location.origin}${window.location.pathname}?portal=customer`;
+
+  const copyLink = () => {
+    navigator.clipboard.writeText(portalUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   return (
     <motion.div 
@@ -3804,20 +3890,29 @@ function SettingsView({ user, hasPermission }: { user: any; hasPermission: (modu
       className="max-w-4xl mx-auto space-y-6"
     >
       {/* settings tab navigation */}
-      <div className="bg-white p-2 rounded-2xl flex border border-gray-100 shadow-sm gap-1">
+      <div className="bg-white p-2 rounded-2xl flex flex-wrap border border-gray-100 shadow-sm gap-1">
         <button
           onClick={() => setActiveTab('system')}
           className={cn(
-            "flex-1 py-3 text-sm font-bold rounded-xl transition-all",
+            "flex-1 min-w-[120px] py-3 text-xs md:text-sm font-bold rounded-xl transition-all",
             activeTab === 'system' ? "bg-[#002d2d] text-white" : "text-gray-500 hover:text-[#002d2d] hover:bg-gray-50"
           )}
         >
           General Settings
         </button>
         <button
+          onClick={() => setActiveTab('logo')}
+          className={cn(
+            "flex-1 min-w-[120px] py-3 text-xs md:text-sm font-bold rounded-xl transition-all",
+            activeTab === 'logo' ? "bg-[#002d2d] text-white" : "text-gray-500 hover:text-[#002d2d] hover:bg-gray-50"
+          )}
+        >
+          ব্র্যান্ড ও লোগো (Branding)
+        </button>
+        <button
           onClick={() => setActiveTab('sms')}
           className={cn(
-            "flex-1 py-3 text-sm font-bold rounded-xl transition-all",
+            "flex-1 min-w-[120px] py-3 text-xs md:text-sm font-bold rounded-xl transition-all",
             activeTab === 'sms' ? "bg-[#002d2d] text-white" : "text-gray-500 hover:text-[#002d2d] hover:bg-gray-50"
           )}
         >
@@ -3855,17 +3950,69 @@ function SettingsView({ user, hasPermission }: { user: any; hasPermission: (modu
           <h3 className="text-2xl font-bold text-gray-900 mb-6">System Settings</h3>
           
           <div className="space-y-8">
+            {/* Shareable Client Link */}
+            <section className="bg-gradient-to-r from-[#002d2d] to-[#014141] text-white p-6 rounded-3xl border border-emerald-950 shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4 text-left">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="bg-emerald-500 text-white text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider">Secure Client Portal URL</span>
+                  <h4 className="font-bold text-base flex items-center gap-1">🔗 শেয়ারযোগ্য গ্রাহক বিলিং পোর্টাল লিঙ্ক</h4>
+                </div>
+                <p className="text-xs text-teal-100 leading-relaxed max-w-2xl">
+                  এই লিংকটি কাস্টমারদের এসএমএস বা ওয়াটসঅ্যাপে পাঠালে তারা সরাসরি নিজের বিলিং হিস্ট্রি ও পেমেন্ট রকেস্ট পোর্টাল পাবেন। এই পোর্টালে আপনার স্টাফ/এডমিন লগইন সম্পূর্ণভাবে <b>আড়ালে (Hidden)</b> থাকবে।
+                </p>
+              </div>
+              
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="bg-[#001717]/60 border border-white/10 px-4 py-2.5 rounded-xl font-mono text-xs select-all text-emerald-300 truncate max-w-[180px] md:max-w-xs">
+                  {portalUrl}
+                </div>
+                <button 
+                  type="button"
+                  onClick={copyLink}
+                  className="p-3 bg-emerald-500 hover:bg-emerald-600 active:scale-95 text-white rounded-xl transition-all cursor-pointer flex items-center gap-1.5 font-bold text-xs shrink-0 shadow-sm"
+                >
+                  {copied ? (
+                    <>
+                      <CheckCircle size={14} className="text-white" />
+                      কপি হয়েছে
+                    </>
+                  ) : (
+                    <>
+                      <Copy size={14} className="text-white" />
+                      কপি করুন
+                    </>
+                  )}
+                </button>
+                <a 
+                  href={portalUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="p-3 bg-white/10 hover:bg-white/20 text-white rounded-xl transition-all cursor-pointer shrink-0 border border-white/5"
+                  title="লিংকটি পরখ করুন"
+                >
+                  <ExternalLink size={14} />
+                </a>
+              </div>
+            </section>
+
             <section>
               <h4 className="flex items-center gap-2 text-lg font-bold text-gray-900 mb-4">
                 <Activity className="text-[#002d2d]" size={18} />
                 ISP Configuration
               </h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100">
-                  <p className="text-xs font-bold text-gray-400 uppercase mb-1">Company Name</p>
-                  <p className="font-bold text-gray-900">ISP RADIAL</p>
+                <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100 flex items-center justify-between gap-3 text-left">
+                  <div>
+                    <p className="text-xs font-bold text-gray-400 uppercase mb-1">Company Name</p>
+                    <p className="font-bold text-gray-900">{branding?.companyName || 'ISP RADIAL'}</p>
+                  </div>
+                  {branding?.useCustomLogo && branding?.logoUrl && (
+                    <div className="w-10 h-10 bg-white border border-gray-150 rounded-xl flex items-center justify-center p-1 shrink-0 overflow-hidden shadow-sm">
+                      <img src={branding.logoUrl} alt="Logo" className="max-w-full max-h-full object-contain" referrerPolicy="no-referrer" />
+                    </div>
+                  )}
                 </div>
-                <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100">
+                <div className="p-4 bg-gray-50 rounded-2xl border border-gray-100 text-left">
                   <p className="text-xs font-bold text-gray-400 uppercase mb-1">Contact Email</p>
                   <p className="font-bold text-gray-900">{user?.email}</p>
                 </div>
@@ -3939,6 +4086,10 @@ function SettingsView({ user, hasPermission }: { user: any; hasPermission: (modu
 
       {activeTab === 'permissions' && canAccessHR && (
         <RoleControlView />
+      )}
+
+      {activeTab === 'logo' && (
+        <LogoConfigPanel />
       )}
 
       {activeTab === 'sms' && (
@@ -4587,6 +4738,11 @@ function CustomerPortalView({ customerId, onLogout }: { customerId: string; onLo
   const [packages, setPackages] = useState<Package[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
+  const [branding, setBranding] = useState<LogoConfig>(DEFAULT_LOGO_CONFIG);
+
+  useEffect(() => {
+    getLogoConfig().then(setBranding).catch(err => console.error("Customer portal logos failed to load", err));
+  }, []);
   
   // Custom states for recharge request
   const [rechargeMethod, setRechargeMethod] = useState('bKash');
@@ -4713,11 +4869,17 @@ function CustomerPortalView({ customerId, onLogout }: { customerId: string; onLo
       {/* Top Client Navbar */}
       <nav className="sticky top-0 bg-[#002d2d] text-white py-4 px-6 md:px-12 flex items-center justify-between z-30 shadow-md">
         <div className="flex items-center gap-3">
-          <div className="p-2 bg-emerald-400/20 rounded-xl">
-            <Activity className="w-6 h-6 text-emerald-400" />
-          </div>
+          {branding.useCustomLogo && branding.logoUrl ? (
+            <div className="w-10 h-10 bg-white border border-[#002d2d]/10 rounded-xl flex items-center justify-center p-1 shrink-0 overflow-hidden">
+              <img src={branding.logoUrl} alt="Logo" className="max-w-full max-h-full object-contain" referrerPolicy="no-referrer" />
+            </div>
+          ) : (
+            <div className="p-2 bg-emerald-400/20 rounded-xl">
+              <Activity className="w-6 h-6 text-emerald-400" />
+            </div>
+          )}
           <div>
-            <h1 className="font-extrabold text-lg md:text-xl tracking-tight">ISP RADIAL</h1>
+            <h1 className="font-extrabold text-lg md:text-xl tracking-tight truncate max-w-[150px] md:max-w-[250px]">{branding.companyName || 'ISP RADIAL'}</h1>
             <p className="text-[10px] text-emerald-400 font-bold uppercase tracking-wide">Client Portal / গ্রাহক সেলফ-সার্ভিস</p>
           </div>
         </div>
@@ -4742,7 +4904,7 @@ function CustomerPortalView({ customerId, onLogout }: { customerId: string; onLo
         <div className="bg-gradient-to-r from-teal-900 via-[#002d2d] to-emerald-950 text-white rounded-3xl p-6 md:p-8 shadow-xl flex flex-col md:flex-row items-center justify-between gap-6">
           <div className="text-left">
             <h2 className="text-xl md:text-3xl font-extrabold tracking-tight">আসসালামু আলাইকুম, {customer?.name}! 🙋‍♂️</h2>
-            <p className="text-teal-200 mt-2 text-sm md:text-base">আইএসপি রেডিয়াল গ্রাহক পোর্টালে আপনাকে স্বাগতম। এখান থেকে আপনার বিল পরিশোধ করুন ও সংযোগের বিবরণ দেখুন।</p>
+            <p className="text-teal-200 mt-2 text-sm md:text-base">{branding.companyName || 'আইএসপি রেডিয়াল'} গ্রাহক পোর্টালে আপনাকে স্বাগতম। এখান থেকে আপনার বিল পরিশোধ করুন ও সংযোগের বিবরণ দেখুন।</p>
           </div>
           
           <div className="flex items-center gap-3 bg-white/10 px-5 py-4 rounded-2xl border border-white/15">
@@ -4969,7 +5131,7 @@ function CustomerPortalView({ customerId, onLogout }: { customerId: string; onLo
               </button>
             </div>
 
-            <p className="text-[10px] text-center text-slate-400 mt-4">Note: This is a fast, ping diagnostics based utility connecting directly to ISP RADIAL local edge caching node.</p>
+            <p className="text-[10px] text-center text-slate-400 mt-4">Note: This is a fast, ping diagnostics based utility connecting directly to {branding.companyName || 'ISP RADIAL'} local edge caching node.</p>
           </div>
         </div>
 
